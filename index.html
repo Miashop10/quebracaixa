@@ -675,19 +675,6 @@ body.role-master .wrap{max-width:1400px}
       <p class="lead">Gerencie filiais, caixas e senhas. Ações sensíveis exigem a senha master.</p>
 
       <div class="card settings-box">
-        <h3>Sincronização na nuvem (Google Sheets)</h3>
-        <p class="lead" style="margin-bottom:14px">Cole a URL do Apps Script e o token para compartilhar os dados entre todas as filiais. Configure em cada dispositivo uma única vez.</p>
-        <div><label>URL do Apps Script (termina em /exec)</label><input type="text" id="cloudUrl" class="fld" placeholder="https://script.google.com/macros/s/.../exec"></div>
-        <div style="margin-top:10px"><label>Token</label><input type="text" id="cloudToken" class="fld" placeholder="o mesmo token do Apps Script"></div>
-        <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
-          <button class="btn small" style="width:auto" onclick="salvarCloudCfg()">Conectar</button>
-          <button class="btn sec small" style="width:auto" onclick="testarCloud()">Testar conexão</button>
-          <button class="btn ghost small" style="width:auto" onclick="desconectarCloud()">Desconectar</button>
-        </div>
-        <p class="lead" id="cloudStatus" style="margin:12px 0 0;font-size:12px"></p>
-      </div>
-
-      <div class="card settings-box">
         <h3>Criar filial</h3>
         <div class="grid g2">
           <div><label>Nome da filial</label><input type="text" id="newFilName" class="fld" placeholder="Ex: Centro"></div>
@@ -768,12 +755,19 @@ try {
 } catch(e){ /* segue sem PDF.js */ }
 
 const DB_KEY = 'miashop_db_v1';
-const CLOUD_CFG_KEY = 'miashop_cloud_cfg'; // {url, token} guardado localmente em cada dispositivo
+const CLOUD_CFG_KEY = 'miashop_cloud_cfg'; // (legado) config manual por dispositivo
 
-/* ---------- Configuração da nuvem (Apps Script) ---------- */
-// Cada dispositivo guarda a URL do Apps Script e o token localmente.
-// Quando configurado, o sistema carrega/salva o banco na planilha compartilhada.
+/* ---------- Configuração da nuvem (Apps Script) — EMBUTIDA ----------
+   A URL fica fixa aqui, então o sistema já conecta sozinho em qualquer
+   dispositivo, sem precisar configurar nada na tela e sem token. */
+const CLOUD_URL   = 'https://script.google.com/macros/s/AKfycbwD1C_AZtrJ-2qOUo_UoUxYWTnWATk2PKTIKbn2IhGOJSZqaQWtgx7xWb73KTam828F/exec';
+const CLOUD_TOKEN = ''; // sem token
+
 function getCloudCfg(){
+  // usa a URL embutida se estiver preenchida; senão cai p/ a manual (legado)
+  if(CLOUD_URL){
+    return { url:CLOUD_URL.trim(), token:(CLOUD_TOKEN||'').trim() };
+  }
   try{ const r=localStorage.getItem(CLOUD_CFG_KEY); return r?JSON.parse(r):null; }catch(e){ return null; }
 }
 function setCloudCfg(url, token){
@@ -2234,13 +2228,6 @@ function desconectarCloud(){
 }
 
 function renderConfig(){
-  // preenche os campos da nuvem com a config atual
-  const cfg=getCloudCfg();
-  if($('cloudUrl')) $('cloudUrl').value = cfg?cfg.url:'';
-  if($('cloudToken')) $('cloudToken').value = cfg?cfg.token:'';
-  if($('cloudStatus')) $('cloudStatus').textContent = cfg
-    ? 'Conectado. Os dados são compartilhados com todas as filiais.'
-    : 'Não conectado — os dados ficam só neste dispositivo.';
   // select de filial p/ caixa
   $('newCaixaFilial').innerHTML = DB.filiais.map(f=>`<option value="${f.id}">${f.nome}</option>`).join('')||'<option value="">— crie uma filial —</option>';
   // lista filiais
