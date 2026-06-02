@@ -914,6 +914,13 @@ const $ = id => document.getElementById(id);
 const fmt = n => 'R$ ' + (Number(n)||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
 const todayStr = () => { const d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
 function prevDay(dateStr){ const d=new Date(dateStr+'T12:00'); d.setDate(d.getDate()-1); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+// Último fechamento ANTERIOR à data, para o mesmo filial/caixa.
+// Pula dias sem lançamento (ex.: domingo fechado) e pega o último existente (ex.: sábado).
+function ultimoFechamentoAnterior(data, fid, cid){
+  return DB.fechamentos
+    .filter(r=>r.filialId===fid && r.caixaId===cid && r.data < data)
+    .sort((a,b)=> a.data<b.data?1:-1)[0] || null; // mais recente entre os anteriores
+}
 function filialNome(id){ const f=DB.filiais.find(f=>f.id===id); return f?f.nome:'—'; }
 function caixaNome(id){ const c=DB.caixas.find(c=>c.id===id); return c?c.nome:'—'; }
 
@@ -1364,15 +1371,16 @@ $('cData') && $('cData').addEventListener('change', limparCamposConferencia);
 function carregarConferencia(){
   const data=$('cData').value, fid=$('cFilial').value, cid=$('cCaixa').value;
   if(!data||!fid||!cid){ toast('Selecione data, filial e caixa.','bad'); return; }
-  const prev=prevDay(data);
 
   // LIMPA TODOS os campos primeiro, para que valores de uma seleção anterior
   // nunca "grudem" ao trocar de data, filial ou caixa.
   ['cAbertura','cVendaDin','cDespesas','cDeposito','cEcom','cObsDesp','cFechamento',
    'cShop9','cGetnet','cPix','cSenff'].forEach(id=>{ const e=$(id); if(e) e.value=''; });
 
-  // ABERTURA = valor final do caixa do DIA ANTERIOR
-  const fechPrev=DB.fechamentos.find(r=>r.data===prev&&r.filialId===fid&&r.caixaId===cid);
+  // ABERTURA = valor final do caixa do ÚLTIMO fechamento ANTERIOR existente.
+  // Se a loja não abriu no dia anterior (ex.: domingo sem lançamento), pega o
+  // último dia com fechamento (ex.: o sábado).
+  const fechPrev=ultimoFechamentoAnterior(data, fid, cid);
   $('cAbertura').value = fechPrev ? fechPrev.valorFinal.toFixed(2) : '';
 
   // DEPÓSITOS, DESPESAS, ECOMMERCE e VALOR DE FECHAMENTO = do DIA conferido
@@ -1388,7 +1396,7 @@ function carregarConferencia(){
   if(!fechPrev && !fechHoje){
     toast('Sem fechamento lançado para esta filial/caixa (dia conferido ou anterior).','bad');
   } else if(!fechPrev){
-    toast('Sem fechamento no dia anterior — abertura ficou em branco.','bad');
+    toast('Sem fechamento anterior — abertura ficou em branco.','bad');
   }
 
   // dados importados (GetNet + Shop9), FILTRADOS pela data selecionada.
