@@ -788,7 +788,8 @@ function defaultDB(){
     arquivos: [],         // {id, tipo, nome, ts, registros:[]}
     getnetData: [],       // {filial, caixa, getnet, pix, senff}
     shop9Data: [],        // {filial, caixa, dinheiro, shop9}
-    semMov: {}            // "data|filialId|caixaId" -> true (caixa sem movimentação naquele dia)
+    semMov: {},           // "data|filialId|caixaId" -> true (caixa sem movimentação naquele dia)
+    deleted: { fechamentos:[], conferencias:[], arquivos:[], filiais:[], caixas:[] } // "lápides": ids excluídos (p/ não voltarem na sincronização)
   };
 }
 let DB = load();
@@ -798,12 +799,21 @@ function load(){
 }
 // garante campos novos em bancos salvos por versões anteriores
 if(!DB.semMov || typeof DB.semMov!=='object') DB.semMov={};
+if(!DB.deleted || typeof DB.deleted!=='object') DB.deleted={ fechamentos:[], conferencias:[], arquivos:[], filiais:[], caixas:[] };
 function normalizeDB(d){
   d=d||{};
   const base=defaultDB();
   for(const k in base){ if(d[k]===undefined) d[k]=base[k]; }
   if(!d.semMov||typeof d.semMov!=='object') d.semMov={};
+  if(!d.deleted||typeof d.deleted!=='object') d.deleted={ fechamentos:[], conferencias:[], arquivos:[], filiais:[], caixas:[] };
+  ['fechamentos','conferencias','arquivos','filiais','caixas'].forEach(k=>{ if(!Array.isArray(d.deleted[k])) d.deleted[k]=[]; });
   return d;
+}
+// registra a exclusão de um id (lápide), p/ que a sincronização não o ressuscite
+function tombstone(key, id){
+  if(!DB.deleted) DB.deleted={};
+  if(!Array.isArray(DB.deleted[key])) DB.deleted[key]=[];
+  if(!DB.deleted[key].includes(id)) DB.deleted[key].push(id);
 }
 
 // Salva localmente (sempre) e, se a nuvem estiver ativa, envia para a planilha.
@@ -858,28 +868,40 @@ async function cloudSave(){
 // Mescla dois bancos: listas por id (o ts maior vence), e configs do "local" prevalecem.
 function mergeDB(remoto, local){
   const out=normalizeDB(JSON.parse(JSON.stringify(remoto)));
+  const L=normalizeDB(JSON.parse(JSON.stringify(local)));
   const porId=(arr)=>{ const m={}; (arr||[]).forEach(x=>{ if(x&&x.id) m[x.id]=x; }); return m; };
+
+  // une as "lápides" (exclusões) dos dois lados — uma exclusão em qualquer lado vale
+  const tombKeys=['fechamentos','conferencias','arquivos','filiais','caixas'];
+  const tomb={};
+  tombKeys.forEach(k=>{
+    const s=new Set([...(out.deleted[k]||[]), ...(L.deleted[k]||[])]);
+    tomb[k]=s;
+    out.deleted[k]=Array.from(s);
+  });
+
+  // listas versionadas por ts: une por id, ts maior vence, e descarta ids excluídos
   ['fechamentos','conferencias','arquivos'].forEach(key=>{
     const m=porId(out[key]);
-    (local[key]||[]).forEach(x=>{
+    (L[key]||[]).forEach(x=>{
       if(!x||!x.id) return;
       if(!m[x.id] || (x.ts||0)>=(m[x.id].ts||0)) m[x.id]=x;
     });
-    out[key]=Object.values(m);
+    out[key]=Object.values(m).filter(x=> !tomb[key].has(x.id));
   });
-  // filiais e caixas: une por id (local prevalece em conflito)
+  // filiais e caixas: une por id (local prevalece), e descarta ids excluídos
   ['filiais','caixas'].forEach(key=>{
     const m=porId(out[key]);
-    (local[key]||[]).forEach(x=>{ if(x&&x.id) m[x.id]=x; });
-    out[key]=Object.values(m);
+    (L[key]||[]).forEach(x=>{ if(x&&x.id) m[x.id]=x; });
+    out[key]=Object.values(m).filter(x=> !tomb[key].has(x.id));
   });
   // mapas simples: une as chaves (local prevalece)
-  out.depChecks=Object.assign({}, out.depChecks||{}, local.depChecks||{});
-  out.semMov=Object.assign({}, out.semMov||{}, local.semMov||{});
+  out.depChecks=Object.assign({}, out.depChecks||{}, L.depChecks||{});
+  out.semMov=Object.assign({}, out.semMov||{}, L.semMov||{});
   // dados importados e senha master: o local (quem está salvando agora) prevalece
-  out.getnetData=local.getnetData||out.getnetData||[];
-  out.shop9Data=local.shop9Data||out.shop9Data||[];
-  out.masterPass=local.masterPass||out.masterPass;
+  out.getnetData=L.getnetData||out.getnetData||[];
+  out.shop9Data=L.shop9Data||out.shop9Data||[];
+  out.masterPass=L.masterPass||out.masterPass;
   return out;
 }
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
@@ -1265,7 +1287,9 @@ function fmtDate(s){ const [y,m,d]=s.split('-'); return `${d}/${m}/${y}`; }
 
 function delFechamento(id){
   askMaster('Excluir este lançamento do histórico?', ()=>{
-    DB.fechamentos=DB.fechamentos.filter(r=>r.id!==id); save(); renderHistorico(); renderDepReport&&renderDepReport(); toast('Lançamento excluído.','ok');
+    DB.fechamentos=DB.fechamentos.filter(r=>r.id!==id);
+    tombstone('fechamentos', id);
+    save(); renderHistorico(); renderDepReport&&renderDepReport(); toast('Lançamento excluído.','ok');
   });
 }
 // edição completa: carrega o lançamento no formulário de Fechamento (modo edição)
@@ -1732,12 +1756,14 @@ function delArquivo(arqId){
       const kGetnet=normCx(fnome)+'|'+(c.data||'');
       // se a conferência dependia de um dado removido deste arquivo, ela é desfeita
       const dependia = chaveShop9.has(kShop9) || chaveGetnet.has(kGetnet);
+      if(dependia) tombstone('conferencias', c.id); // lápide p/ não voltar na sincronização
       return !dependia;
     });
     const confDesfeitas=antesConf-DB.conferencias.length;
 
     // remove o arquivo do histórico
     DB.arquivos=DB.arquivos.filter(x=>x.id!==arqId);
+    tombstone('arquivos', arqId);
     save(); renderFiles();
     if(typeof renderCalendar==='function') renderCalendar();
     if(typeof renderResumo==='function') renderResumo();
@@ -1885,6 +1911,7 @@ function delConferencia(id){
   askMaster('Excluir este lançamento de conferência?', ()=>{
     const alvo=DB.conferencias.find(x=>x.id===id);
     DB.conferencias=DB.conferencias.filter(x=>x.id!==id);
+    tombstone('conferencias', id);
     save();
     renderResumo();
     if(typeof renderCalendar==='function') renderCalendar();
@@ -2260,8 +2287,10 @@ function editFilial(id){
 }
 function delFilial(id){
   askMaster('Excluir a filial e seus caixas?', ()=>{
+    DB.caixas.filter(c=>c.filialId===id).forEach(c=>tombstone('caixas', c.id));
     DB.filiais=DB.filiais.filter(f=>f.id!==id);
     DB.caixas=DB.caixas.filter(c=>c.filialId!==id);
+    tombstone('filiais', id);
     save(); renderConfig(); refreshLoginFiliais(); toast('Filial excluída.','ok');
   });
 }
@@ -2274,7 +2303,7 @@ function editCaixa(id){
 }
 function delCaixa(id){
   askMaster('Excluir este caixa?', ()=>{
-    DB.caixas=DB.caixas.filter(c=>c.id!==id); save(); renderConfig(); refreshCaixaSelect(); toast('Caixa excluído.','ok');
+    DB.caixas=DB.caixas.filter(c=>c.id!==id); tombstone('caixas', id); save(); renderConfig(); refreshCaixaSelect(); toast('Caixa excluído.','ok');
   });
 }
 function trocarMaster(){
