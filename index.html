@@ -1647,7 +1647,11 @@ function mostrarResultadoImport(tipo, arr){
 function mostrarResultadoImportGetnet(arr){ mostrarResultadoImport('GetNet', arr); }
 
 // Parser do Shop9 — relatório "Vendas por Tipo de Recebimento".
-// Formato real do PDF: rótulos "Filial: N - NOME" e "Caixa: N - NOME C. Conv. <data> <numeros>".
+// Ordem real do texto extraído do PDF (pdf.js / navegador):
+//   Filial: N - NOME
+//   Caixa: N - NOME
+//   Data Conta Cli. Dinheiro ... (cabeçalho das colunas)
+//   01/06/2026  <Conta>  <Dinheiro>  <Cheque> <Pré> <Débito> <Crédito> ... <Total>
 // Após a data, a ordem dos números é:
 //   ContaCli[0] Dinheiro[1] Cheque[2] Pré[3] C.Débito[4] C.Crédito[5] ...
 //   -> Dinheiro = índice 1 ; Venda Shop9 (cartão) = C.Débito[4] + C.Crédito[5]
@@ -1670,38 +1674,37 @@ function parseShop9(rawText){
   // filiais a IGNORAR (e-commerce / centro de distribuição), em qualquer grafia
   const IGNORAR = /(e-?\s*commerce|centro de distribui)/i;
 
-  // marca cada filial: "Filial: N - NOME" -> <<FIL:N - NOME>> (nome até antes de Data/Caixa/Filial)
-  text = text.replace(/Filial:\s*(\d+\s*-\s*.+?)(?=\s+Data |\s+Caixa:|\s+Filial:)/g,
+  // marca cada filial e cada caixa com delimitadores próprios, capturando o NOME
+  // até o próximo rótulo (Caixa:/Filial:/Data/Total) — sem depender de "C. Conv.".
+  text = text.replace(/Filial:\s*(\d+\s*-\s*.+?)(?=\s+Caixa:|\s+Filial:|\s+Data |\s+Total:)/g,
                       (m,nome)=>` <<FIL:${nome.trim()}>> `);
+  text = text.replace(/Caixa:\s*(\d+\s*-\s*.+?)(?=\s+Caixa:|\s+Filial:|\s+Data |\s+Total:)/g,
+                      (m,nome)=>` <<CX:${nome.trim()}>> `);
 
-  const lastFilial = seg => { const fs=seg.match(/<<FIL:(.+?)>>/g); return fs? fs[fs.length-1].replace(/<<FIL:|>>/g,''):null; };
-
-  const parts = text.split(/Caixa:\s*/);
+  // agora percorre os marcadores na ordem, mantendo a filial e o caixa vigentes,
+  // e captura a 1ª linha de dados (data + >=6 números) após cada caixa.
   const out=[];
-  let cur = lastFilial(parts[0]);
-  for(let i=1;i<parts.length;i++){
-    const seg = parts[i];
-    const mname = seg.match(/^\s*([0-9]+\s*-\s*.+?)\s+C\.\s*Conv\./);
-    const caixa = mname ? mname[1].trim() : null;
-    // primeira linha de dados: DATA (dd/mm/aaaa) seguida de >=6 valores no formato 0,00
-    const mdata = seg.match(/(\d{2}\/\d{2}\/\d{4})((?:\s+\d[\d.]*,\d{2}){6,})/);
-    // filial vigente para este segmento (pode haver um <<FIL>> logo no início dele)
-    const nfPre = lastFilial((seg.split(/\d{2}\/\d{2}\/\d{4}/)[0])||'');
-    const filialDoSeg = nfPre || cur;
-    if(caixa && mdata && filialDoSeg && !IGNORAR.test(filialDoSeg)){
-      const dataISO = brDate(mdata[1]);             // converte dd/mm/aaaa -> aaaa-mm-dd
-      const nums = mdata[2].match(/\d[\d.]*,\d{2}/g);
-      if(nums && nums.length>=6){
-        const dinheiro = br(nums[1]);
-        const shop9 = Math.round((br(nums[4])+br(nums[5]))*100)/100;
-        // remove o prefixo de código "N - " do nome (ex.: "1 - PONTA GROSSA" -> "PONTA GROSSA")
-        const filNome = filialDoSeg.replace(/^\s*\d+\s*-\s*/,'').trim();
-        const cxNome  = caixa.replace(/^\s*\d+\s*-\s*/,'').trim();
-        out.push({data:dataISO, filial:filNome, caixa:cxNome, dinheiro, shop9});
+  // quebra o texto em tokens de marcador / linha-de-dados
+  const re=/<<FIL:(.+?)>>|<<CX:(.+?)>>|(\d{2}\/\d{2}\/\d{4}(?:\s+\d[\d.]*,\d{2}){6,})/g;
+  let m, curFil=null, curCx=null, cxJaUsado=false;
+  while((m=re.exec(text))!==null){
+    if(m[1]!==undefined){ curFil=m[1].trim(); }
+    else if(m[2]!==undefined){ curCx=m[2].trim(); cxJaUsado=false; }
+    else if(m[3]!==undefined){
+      if(curFil && curCx && !cxJaUsado && !IGNORAR.test(curFil)){
+        const partes=m[3].match(/\d[\d.]*,\d{2}/g);
+        const dataM=m[3].match(/(\d{2})\/(\d{2})\/(\d{4})/);
+        if(partes && partes.length>=6 && dataM){
+          const dataISO=dataM[3]+'-'+dataM[2]+'-'+dataM[1];
+          const dinheiro=br(partes[1]);
+          const shop9=Math.round((br(partes[4])+br(partes[5]))*100)/100;
+          const filNome=curFil.replace(/^\s*\d+\s*-\s*/,'').trim();
+          const cxNome =curCx.replace(/^\s*\d+\s*-\s*/,'').trim();
+          out.push({data:dataISO, filial:filNome, caixa:cxNome, dinheiro, shop9});
+          cxJaUsado=true; // só a 1ª linha de dados de cada caixa (a de detalhe, não o "Total:")
+        }
       }
     }
-    const nf = lastFilial(seg);
-    if(nf) cur = nf;
   }
   return out;
 }
