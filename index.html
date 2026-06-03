@@ -1664,42 +1664,47 @@ function mostrarResultadoImport(tipo, arr){
 function mostrarResultadoImportGetnet(arr){ mostrarResultadoImport('GetNet', arr); }
 
 // Parser do Shop9 — relatório "Vendas por Tipo de Recebimento".
-// Robusto a variações de espaçamento/ordem do texto extraído pelo pdf.js.
-// Estratégia: percorre o texto marcando "Filial: N - NOME" e "Caixa: N - NOME",
-// e captura a 1ª linha de dados (data + >=6 números) de cada caixa.
-//   Após a data: ContaCli[0] Dinheiro[1] Cheque[2] Pré[3] C.Débito[4] C.Crédito[5] ...
+// Ordem REAL do texto extraído pelo pdf.js no navegador:
+//   "1 - PONTA GROSSA Filial:  Data Vales Conta Cli. Dinheiro ... Total
+//    Caixa: 1 - Caixa 1 C. Conv. 01/06/2026 <11 números> Total: <11 números> ..."
+//   -> A filial aparece ANTES do rótulo "Filial:".
+//   -> O caixa aparece como "Caixa: N - NOME C. Conv.".
+// Na linha de dados, após a data, a ordem dos números é:
+//   ContaCli[0] Dinheiro[1] Cheque[2] Pré[3] C.Débito[4] C.Crédito[5] ...
 //   -> Dinheiro = índice 1 ; Venda Shop9 (cartão) = C.Débito[4] + C.Crédito[5]
 // Ignora E-COMMERCE e CENTRO DE DISTRIBUIÇÃO.
 function parseShop9(rawText){
   let text = (rawText||'').replace(/\u00a0/g,' ').replace(/\s+/g,' ').trim();
   const IGNORAR = /(e-?\s*commerce|centro de distribui)/i;
 
-  // Token a token: detecta rótulos de Filial/Caixa e linhas de dados (data + números).
-  // Usamos uma regex global que captura QUALQUER um dos três casos, na ordem do texto.
-  const re = /Filial:\s*(\d+\s*-\s*[^]*?)(?=\s+(?:Filial:|Caixa:|Data\b|Total:|$))|Caixa:\s*(\d+\s*-\s*[^]*?)(?=\s+(?:Filial:|Caixa:|Data\b|Total:|$))|(\d{2}\/\d{2}\/\d{4})((?:\s+-?\d[\d.]*,\d{2}){6,})/g;
+  // 1º marca os CAIXAS: "Caixa: N - NOME C. Conv." -> <<CX:N - NOME>>
+  //   (feito ANTES das filiais para que o "N - NOME" do caixa não seja confundido
+  //    com o início de uma filial na marcação seguinte.)
+  text = text.replace(/Caixa:\s*(\d+\s*-\s*.+?)\s+C\.\s*Conv\./g, (m,nome)=>` <<CX:${nome.trim()}>> `);
+  // 2º marca as FILIAIS: "N - NOME Filial:" -> <<FIL:N - NOME>>
+  //   (o nome não pode conter outro rótulo; <[^<>] impede atravessar marcadores já postos)
+  text = text.replace(/(\d+\s*-\s*[^<>]+?)\s+Filial:/g, (m,nome)=>` <<FIL:${nome.trim()}>> `);
 
+  // percorre marcadores e linhas de dados na ordem
+  const re=/<<FIL:(.+?)>>|<<CX:(.+?)>>|(\d{2}\/\d{2}\/\d{4})((?:\s+-?\d[\d.]*,\d{2}){6,})/g;
   const out=[];
   let curFil=null, curCx=null, cxUsado=false, m;
   while((m=re.exec(text))!==null){
-    if(m[1]!==undefined){            // Filial
-      curFil=m[1].trim(); 
-    } else if(m[2]!==undefined){     // Caixa
-      curCx=m[2].trim(); cxUsado=false;
-    } else if(m[3]!==undefined){     // linha de dados (data + números)
+    if(m[1]!==undefined){ curFil=m[1].trim(); }
+    else if(m[2]!==undefined){ curCx=m[2].trim(); cxUsado=false; }
+    else if(m[3]!==undefined){
       if(curFil && curCx && !cxUsado && !IGNORAR.test(curFil)){
         const nums=(m[4]||'').match(/-?\d[\d.]*,\d{2}/g)||[];
         if(nums.length>=6){
           const d=m[3].split('/');
-          const dataISO=d[2]+'-'+d[1]+'-'+d[0];
-          const dinheiro=br(nums[1]);
-          const shop9=Math.round((br(nums[4])+br(nums[5]))*100)/100;
           out.push({
-            data:dataISO,
+            data:d[2]+'-'+d[1]+'-'+d[0],
             filial:curFil.replace(/^\s*\d+\s*-\s*/,'').trim(),
             caixa:curCx.replace(/^\s*\d+\s*-\s*/,'').trim(),
-            dinheiro, shop9
+            dinheiro:br(nums[1]),
+            shop9:Math.round((br(nums[4])+br(nums[5]))*100)/100
           });
-          cxUsado=true; // só a 1ª linha de dados de cada caixa
+          cxUsado=true; // só a 1ª linha de dados de cada caixa (a de detalhe; ignora "Total:")
         }
       }
     }
