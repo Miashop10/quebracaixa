@@ -1617,8 +1617,25 @@ async function importShop9(){
       mostrarResultadoImport('Shop9', out);
     } else {
       toast('PDF lido, mas não encontrei registros no layout esperado.','bad');
+      // diagnóstico: mostra na tela o texto cru lido do PDF, p/ ajuste do parser
+      mostrarTextoCru(full);
     }
   }catch(err){ toast('Erro ao ler PDF: '+err.message,'bad'); }
+}
+
+// Em caso de falha de leitura, exibe o texto cru extraído do PDF (ajuda a diagnosticar o layout).
+function mostrarTextoCru(txt){
+  let box=$('importResult');
+  if(!box){
+    box=document.createElement('div'); box.id='importResult'; box.className='hint';
+    box.style.marginTop='14px';
+    const card=$('fileShop9').closest('.card'); card.appendChild(box);
+  }
+  box.style.display='block'; box.style.borderLeftColor='var(--red)';
+  const amostra=(txt||'').slice(0,1500).replace(/</g,'&lt;');
+  box.innerHTML=`<b>Não consegui interpretar o PDF.</b><br>
+    Texto lido (início), para diagnóstico:
+    <pre style="white-space:pre-wrap;font-size:11px;max-height:240px;overflow:auto;background:var(--panel-2);padding:8px;border-radius:6px;margin-top:6px">${amostra||'(vazio)'}</pre>`;
 }
 
 // Painel com o que foi lido do arquivo, para conferência imediata dos nomes/valores.
@@ -1647,61 +1664,42 @@ function mostrarResultadoImport(tipo, arr){
 function mostrarResultadoImportGetnet(arr){ mostrarResultadoImport('GetNet', arr); }
 
 // Parser do Shop9 — relatório "Vendas por Tipo de Recebimento".
-// Ordem real do texto extraído do PDF (pdf.js / navegador):
-//   Filial: N - NOME
-//   Caixa: N - NOME
-//   Data Conta Cli. Dinheiro ... (cabeçalho das colunas)
-//   01/06/2026  <Conta>  <Dinheiro>  <Cheque> <Pré> <Débito> <Crédito> ... <Total>
-// Após a data, a ordem dos números é:
-//   ContaCli[0] Dinheiro[1] Cheque[2] Pré[3] C.Débito[4] C.Crédito[5] ...
+// Robusto a variações de espaçamento/ordem do texto extraído pelo pdf.js.
+// Estratégia: percorre o texto marcando "Filial: N - NOME" e "Caixa: N - NOME",
+// e captura a 1ª linha de dados (data + >=6 números) de cada caixa.
+//   Após a data: ContaCli[0] Dinheiro[1] Cheque[2] Pré[3] C.Débito[4] C.Crédito[5] ...
 //   -> Dinheiro = índice 1 ; Venda Shop9 (cartão) = C.Débito[4] + C.Crédito[5]
-// Ignora filiais de E-COMMERCE e CENTRO DE DISTRIBUIÇÃO (não entram na conferência).
+// Ignora E-COMMERCE e CENTRO DE DISTRIBUIÇÃO.
 function parseShop9(rawText){
-  let text = rawText.replace(/\s+/g,' ');
-  const noise = [
-    /Empresa:\s*Miashop/g,
-    /Vendas por Tipo de Recebimento/g,
-    /Data Inicial:.*?Data Final:\s*\d{2}\/\d{2}\/\d{4}/g,
-    /\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}:\d{2}/g,
-    /IdealSoft - Shop Control 9/g,
-    /A coluna 'Outros'.*?Identificados\./g,
-    /Tot\. Geral:.*/g,
-    /Total de Registros:.*/g
-  ];
-  noise.forEach(r=>{ text = text.replace(r,' '); });
-  text = text.replace(/\s+/g,' ');
-
-  // filiais a IGNORAR (e-commerce / centro de distribuição), em qualquer grafia
+  let text = (rawText||'').replace(/\u00a0/g,' ').replace(/\s+/g,' ').trim();
   const IGNORAR = /(e-?\s*commerce|centro de distribui)/i;
 
-  // marca cada filial e cada caixa com delimitadores próprios, capturando o NOME
-  // até o próximo rótulo (Caixa:/Filial:/Data/Total) — sem depender de "C. Conv.".
-  text = text.replace(/Filial:\s*(\d+\s*-\s*.+?)(?=\s+Caixa:|\s+Filial:|\s+Data |\s+Total:)/g,
-                      (m,nome)=>` <<FIL:${nome.trim()}>> `);
-  text = text.replace(/Caixa:\s*(\d+\s*-\s*.+?)(?=\s+Caixa:|\s+Filial:|\s+Data |\s+Total:)/g,
-                      (m,nome)=>` <<CX:${nome.trim()}>> `);
+  // Token a token: detecta rótulos de Filial/Caixa e linhas de dados (data + números).
+  // Usamos uma regex global que captura QUALQUER um dos três casos, na ordem do texto.
+  const re = /Filial:\s*(\d+\s*-\s*[^]*?)(?=\s+(?:Filial:|Caixa:|Data\b|Total:|$))|Caixa:\s*(\d+\s*-\s*[^]*?)(?=\s+(?:Filial:|Caixa:|Data\b|Total:|$))|(\d{2}\/\d{2}\/\d{4})((?:\s+-?\d[\d.]*,\d{2}){6,})/g;
 
-  // agora percorre os marcadores na ordem, mantendo a filial e o caixa vigentes,
-  // e captura a 1ª linha de dados (data + >=6 números) após cada caixa.
   const out=[];
-  // quebra o texto em tokens de marcador / linha-de-dados
-  const re=/<<FIL:(.+?)>>|<<CX:(.+?)>>|(\d{2}\/\d{2}\/\d{4}(?:\s+\d[\d.]*,\d{2}){6,})/g;
-  let m, curFil=null, curCx=null, cxJaUsado=false;
+  let curFil=null, curCx=null, cxUsado=false, m;
   while((m=re.exec(text))!==null){
-    if(m[1]!==undefined){ curFil=m[1].trim(); }
-    else if(m[2]!==undefined){ curCx=m[2].trim(); cxJaUsado=false; }
-    else if(m[3]!==undefined){
-      if(curFil && curCx && !cxJaUsado && !IGNORAR.test(curFil)){
-        const partes=m[3].match(/\d[\d.]*,\d{2}/g);
-        const dataM=m[3].match(/(\d{2})\/(\d{2})\/(\d{4})/);
-        if(partes && partes.length>=6 && dataM){
-          const dataISO=dataM[3]+'-'+dataM[2]+'-'+dataM[1];
-          const dinheiro=br(partes[1]);
-          const shop9=Math.round((br(partes[4])+br(partes[5]))*100)/100;
-          const filNome=curFil.replace(/^\s*\d+\s*-\s*/,'').trim();
-          const cxNome =curCx.replace(/^\s*\d+\s*-\s*/,'').trim();
-          out.push({data:dataISO, filial:filNome, caixa:cxNome, dinheiro, shop9});
-          cxJaUsado=true; // só a 1ª linha de dados de cada caixa (a de detalhe, não o "Total:")
+    if(m[1]!==undefined){            // Filial
+      curFil=m[1].trim(); 
+    } else if(m[2]!==undefined){     // Caixa
+      curCx=m[2].trim(); cxUsado=false;
+    } else if(m[3]!==undefined){     // linha de dados (data + números)
+      if(curFil && curCx && !cxUsado && !IGNORAR.test(curFil)){
+        const nums=(m[4]||'').match(/-?\d[\d.]*,\d{2}/g)||[];
+        if(nums.length>=6){
+          const d=m[3].split('/');
+          const dataISO=d[2]+'-'+d[1]+'-'+d[0];
+          const dinheiro=br(nums[1]);
+          const shop9=Math.round((br(nums[4])+br(nums[5]))*100)/100;
+          out.push({
+            data:dataISO,
+            filial:curFil.replace(/^\s*\d+\s*-\s*/,'').trim(),
+            caixa:curCx.replace(/^\s*\d+\s*-\s*/,'').trim(),
+            dinheiro, shop9
+          });
+          cxUsado=true; // só a 1ª linha de dados de cada caixa
         }
       }
     }
