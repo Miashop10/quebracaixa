@@ -1569,6 +1569,8 @@ function importGetnet(){
           /venda\s*getnet/i.test(String(r[1]||'')) ||
           /venda\s*pix/i.test(String(r[2]||''));
         if(isHeader) return;
+        // ignora E-COMMERCE e CENTRO DE DISTRIBUIÇÃO (não entram na conferência)
+        if(/(e-?\s*commerce|centro de distribui)/i.test(f)) return;
         const dataISO = excelDateToISO(r[4]);   // converte a 5ª coluna p/ aaaa-mm-dd
         out.push({filial:String(filial), caixa:null, data:dataISO,
           getnet:parseFloat(r[1])||0, pix:parseFloat(r[2])||0, senff:parseFloat(r[3])||0});
@@ -1644,18 +1646,14 @@ function mostrarResultadoImport(tipo, arr){
 }
 function mostrarResultadoImportGetnet(arr){ mostrarResultadoImport('GetNet', arr); }
 
-// Parser do Shop9 — validado contra o relatório real "Vendas por Tipo de Recebimento".
-// IMPORTANTE: o pdf.js lineariza o texto numa ordem específica:
-//   - o NOME da filial vem ANTES do rótulo: "1 - PONTA GROSSA Filial:"
-//   - o NOME do caixa vem DEPOIS: "Caixa: 1 - Caixa 1 C. Conv. <data> <números>"
-//   - tudo numa única sequência, com rodapés de página no meio.
-// Na linha de dados, após a data, a ordem dos números é:
+// Parser do Shop9 — relatório "Vendas por Tipo de Recebimento".
+// Formato real do PDF: rótulos "Filial: N - NOME" e "Caixa: N - NOME C. Conv. <data> <numeros>".
+// Após a data, a ordem dos números é:
 //   ContaCli[0] Dinheiro[1] Cheque[2] Pré[3] C.Débito[4] C.Crédito[5] ...
-//   -> Dinheiro = índice 1 ; Venda Shop9 (cartão/pix) = C.Débito[4] + C.Crédito[5]
-// Conferido: soma de dinheiro e de (débito+crédito) bate com o "Tot. Geral" do relatório.
+//   -> Dinheiro = índice 1 ; Venda Shop9 (cartão) = C.Débito[4] + C.Crédito[5]
+// Ignora filiais de E-COMMERCE e CENTRO DE DISTRIBUIÇÃO (não entram na conferência).
 function parseShop9(rawText){
   let text = rawText.replace(/\s+/g,' ');
-  // remove rodapés/cabeçalhos de página e totais gerais que poluem o fluxo
   const noise = [
     /Empresa:\s*Miashop/g,
     /Vendas por Tipo de Recebimento/g,
@@ -1669,8 +1667,12 @@ function parseShop9(rawText){
   noise.forEach(r=>{ text = text.replace(r,' '); });
   text = text.replace(/\s+/g,' ');
 
-  // marca cada filial: "N - NOME Filial:"  ->  <<FIL:NOME>>
-  text = text.replace(/([0-9]+\s*-\s*[^:<>]+?)\s+Filial:/g, (m,nome)=>` <<FIL:${nome.trim()}>> `);
+  // filiais a IGNORAR (e-commerce / centro de distribuição), em qualquer grafia
+  const IGNORAR = /(e-?\s*commerce|centro de distribui)/i;
+
+  // marca cada filial: "Filial: N - NOME" -> <<FIL:N - NOME>> (nome até antes de Data/Caixa/Filial)
+  text = text.replace(/Filial:\s*(\d+\s*-\s*.+?)(?=\s+Data |\s+Caixa:|\s+Filial:)/g,
+                      (m,nome)=>` <<FIL:${nome.trim()}>> `);
 
   const lastFilial = seg => { const fs=seg.match(/<<FIL:(.+?)>>/g); return fs? fs[fs.length-1].replace(/<<FIL:|>>/g,''):null; };
 
@@ -1683,13 +1685,19 @@ function parseShop9(rawText){
     const caixa = mname ? mname[1].trim() : null;
     // primeira linha de dados: DATA (dd/mm/aaaa) seguida de >=6 valores no formato 0,00
     const mdata = seg.match(/(\d{2}\/\d{2}\/\d{4})((?:\s+\d[\d.]*,\d{2}){6,})/);
-    if(caixa && mdata && cur){
+    // filial vigente para este segmento (pode haver um <<FIL>> logo no início dele)
+    const nfPre = lastFilial((seg.split(/\d{2}\/\d{2}\/\d{4}/)[0])||'');
+    const filialDoSeg = nfPre || cur;
+    if(caixa && mdata && filialDoSeg && !IGNORAR.test(filialDoSeg)){
       const dataISO = brDate(mdata[1]);             // converte dd/mm/aaaa -> aaaa-mm-dd
       const nums = mdata[2].match(/\d[\d.]*,\d{2}/g);
       if(nums && nums.length>=6){
         const dinheiro = br(nums[1]);
         const shop9 = Math.round((br(nums[4])+br(nums[5]))*100)/100;
-        out.push({data:dataISO, filial:cur, caixa, dinheiro, shop9});
+        // remove o prefixo de código "N - " do nome (ex.: "1 - PONTA GROSSA" -> "PONTA GROSSA")
+        const filNome = filialDoSeg.replace(/^\s*\d+\s*-\s*/,'').trim();
+        const cxNome  = caixa.replace(/^\s*\d+\s*-\s*/,'').trim();
+        out.push({data:dataISO, filial:filNome, caixa:cxNome, dinheiro, shop9});
       }
     }
     const nf = lastFilial(seg);
