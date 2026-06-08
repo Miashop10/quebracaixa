@@ -831,7 +831,19 @@ async function cloudLoad(){
     const res=await fetch(cfg.url+'?action=load',{method:'GET'});
     const data=await res.json();
     if(data && data.ok){
-      if(data.db){ DB=normalizeDB(data.db); localStorage.setItem(DB_KEY, JSON.stringify(DB)); }
+      if(data.db){
+        // MESCLA o remoto com o que já existe localmente, para não apagar
+        // importações/lançamentos feitos neste dispositivo que ainda não subiram.
+        const remoto=normalizeDB(data.db);
+        const localAtual=normalizeDB(DB);
+        const merged=mergeDB(remoto, localAtual);
+        DB=merged;
+        localStorage.setItem(DB_KEY, JSON.stringify(DB));
+        // se o local tinha algo a mais que o remoto, re-sincroniza para a nuvem
+        const remotoStr=JSON.stringify({a:remoto.arquivos.length,g:remoto.getnetData.length,s:remoto.shop9Data.length,f:remoto.fechamentos.length,c:remoto.conferencias.length});
+        const mergedStr=JSON.stringify({a:merged.arquivos.length,g:merged.getnetData.length,s:merged.shop9Data.length,f:merged.fechamentos.length,c:merged.conferencias.length});
+        if(remotoStr!==mergedStr){ cloudSave(); }
+      }
       else { await cloudSave(); } // planilha vazia: inicia com o que houver local
       return true;
     }
@@ -898,9 +910,25 @@ function mergeDB(remoto, local){
   // mapas simples: une as chaves (local prevalece)
   out.depChecks=Object.assign({}, out.depChecks||{}, L.depChecks||{});
   out.semMov=Object.assign({}, out.semMov||{}, L.semMov||{});
-  // dados importados e senha master: o local (quem está salvando agora) prevalece
-  out.getnetData=L.getnetData||out.getnetData||[];
-  out.shop9Data=L.shop9Data||out.shop9Data||[];
+  // dados importados: une os dois lados por arquivo (arqId), respeitando lápides de arquivo.
+  // Assim importações de dispositivos diferentes coexistem, e um arquivo excluído não volta.
+  const arqVivos = new Set((out.arquivos||[]).map(a=>a.id));      // arquivos que sobreviveram ao merge
+  const tombArq = tomb.arquivos;
+  const uneImport = (key)=>{
+    const vistos=new Set(), res=[];
+    [...(out[key]||[]), ...(L[key]||[])].forEach(r=>{
+      if(!r) return;
+      // descarta registros de arquivos excluídos
+      if(r.arqId && tombArq.has(r.arqId)) return;
+      // chave única por registro (arqId + filial + caixa + data)
+      const k=(r.arqId||'')+'|'+(r.filial||'')+'|'+(r.caixa||'')+'|'+(r.data||'');
+      if(vistos.has(k)) return;
+      vistos.add(k); res.push(r);
+    });
+    return res;
+  };
+  out.getnetData=uneImport('getnetData');
+  out.shop9Data=uneImport('shop9Data');
   out.masterPass=L.masterPass||out.masterPass;
   return out;
 }
