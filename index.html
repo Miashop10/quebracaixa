@@ -462,7 +462,7 @@ body.role-master .wrap{max-width:1400px}
     <div class="user-chip">
       <span>Filial: <b id="curFilial">—</b></span>
       <span class="badge" id="roleBadge">FILIAL</span>
-      <span id="syncStatus" style="font-size:11px;color:var(--txt-dim)" title="Estado da sincronização com a nuvem"></span>
+      <span id="syncStatus" style="font-size:11px;color:var(--txt-dim);cursor:pointer" title="Clique para diagnosticar a sincronização (ver o que está na nuvem)"></span>
       <button class="btn sec small" id="syncBtn" title="Forçar sincronização agora" style="width:auto">↻</button>
       <button class="tab tab-config" data-page="config" data-master title="Filiais & Caixas">⚙ Filiais</button>
       <button class="btn sec small" id="logoutBtn">Sair</button>
@@ -1160,6 +1160,36 @@ if($('syncBtn')) $('syncBtn').onclick=async ()=>{
   if(typeof renderCalendar==='function') renderCalendar();
   toast('Sincronizado com a nuvem.','ok');
 };
+// DIAGNÓSTICO: clique no texto de status p/ ver o que está na nuvem x no aparelho.
+if($('syncStatus')) $('syncStatus').onclick=diagnosticarNuvem;
+async function diagnosticarNuvem(){
+  const cfg=getCloudCfg();
+  if(!cfg){ alert('Este aparelho não está conectado à nuvem (sem URL configurada).'); return; }
+  let remoto=null, erro=null;
+  try{
+    const r=await fetch(cfg.url+'?action=load',{method:'GET',cache:'no-store'});
+    const d=await r.json();
+    if(d&&d.ok){ remoto=d.db; } else { erro='A nuvem respondeu com erro: '+(d&&d.error||'desconhecido'); }
+  }catch(e){ erro='Não consegui conectar à nuvem: '+e.message; }
+
+  const resumo=(db)=>{
+    if(!db) return '(vazio)';
+    const porFilial={};
+    (db.fechamentos||[]).forEach(f=>{
+      const nome=(db.filiais.find(x=>x.id===f.filialId)||{}).nome||f.filialId;
+      porFilial[nome]=(porFilial[nome]||0)+1;
+    });
+    const linhas=Object.entries(porFilial).map(([n,q])=>`   ${n}: ${q} fechamento(s)`).join('\n')||'   (nenhum fechamento)';
+    return `filiais=${(db.filiais||[]).length} | fechamentos=${(db.fechamentos||[]).length} | conferências=${(db.conferencias||[]).length}\n`+linhas;
+  };
+
+  let msg='=== DIAGNÓSTICO DE SINCRONIZAÇÃO ===\n\n';
+  msg+='URL da nuvem:\n'+cfg.url+'\n\n';
+  if(erro){ msg+='⚠ '+erro+'\n\n'; }
+  msg+='NA NUVEM (planilha):\n'+resumo(remoto)+'\n\n';
+  msg+='NESTE APARELHO (local):\n'+resumo(DB);
+  alert(msg);
+}
 
 /* ---------- Controle de abas por papel ---------- */
 function applyRole(){
