@@ -1172,23 +1172,35 @@ async function diagnosticarNuvem(){
     if(d&&d.ok){ remoto=d.db; } else { erro='A nuvem respondeu com erro: '+(d&&d.error||'desconhecido'); }
   }catch(e){ erro='Não consegui conectar à nuvem: '+e.message; }
 
-  const resumo=(db)=>{
-    if(!db) return '(vazio)';
-    const porFilial={};
-    (db.fechamentos||[]).forEach(f=>{
-      const nome=(db.filiais.find(x=>x.id===f.filialId)||{}).nome||f.filialId;
-      porFilial[nome]=(porFilial[nome]||0)+1;
-    });
-    const linhas=Object.entries(porFilial).map(([n,q])=>`   ${n}: ${q} fechamento(s)`).join('\n')||'   (nenhum fechamento)';
-    return `filiais=${(db.filiais||[]).length} | fechamentos=${(db.fechamentos||[]).length} | conferências=${(db.conferencias||[]).length}\n`+linhas;
+  // datas de fechamento de uma filial específica (p/ ver se o lançamento de hoje subiu)
+  const datasDe=(db, nomeParcial)=>{
+    if(!db) return '(sem dados)';
+    const fil=(db.filiais||[]).find(f=>norm(f.nome).includes(norm(nomeParcial)));
+    if(!fil) return '(filial não encontrada)';
+    const ds=(db.fechamentos||[]).filter(f=>f.filialId===fil.id).map(f=>f.data).sort().reverse();
+    return ds.length? ds.join(', ') : '(nenhum)';
   };
 
+  const cont=(db)=>db? `filiais=${(db.filiais||[]).length} | fechamentos=${(db.fechamentos||[]).length} | conferências=${(db.conferencias||[]).length}`:'(vazio)';
+
   let msg='=== DIAGNÓSTICO DE SINCRONIZAÇÃO ===\n\n';
-  msg+='URL da nuvem:\n'+cfg.url+'\n\n';
   if(erro){ msg+='⚠ '+erro+'\n\n'; }
-  msg+='NA NUVEM (planilha):\n'+resumo(remoto)+'\n\n';
-  msg+='NESTE APARELHO (local):\n'+resumo(DB);
-  alert(msg);
+  msg+='NA NUVEM:  '+cont(remoto)+'\n';
+  msg+='NESTE APARELHO:  '+cont(DB)+'\n\n';
+  msg+='Datas de fechamento da REPÚBLICA 2:\n';
+  msg+=' • na nuvem: '+datasDe(remoto,'republica 2')+'\n';
+  msg+=' • neste aparelho: '+datasDe(DB,'republica 2')+'\n\n';
+  msg+='Deseja FORÇAR o envio dos dados DESTE aparelho para a nuvem agora?\n(Use no computador que TEM os lançamentos que faltam.)';
+  if(confirm(msg)){
+    forcarEnvioNuvem();
+  }
+}
+// Força o envio do banco local para a nuvem (mescla com o remoto e grava).
+async function forcarEnvioNuvem(){
+  setSyncStatus(true,'Forçando envio…');
+  const ok=await cloudSave();
+  if(ok) toast('Dados deste aparelho enviados para a nuvem.','ok');
+  else toast('Não consegui enviar agora. Verifique a internet e tente de novo.','bad');
 }
 
 /* ---------- Controle de abas por papel ---------- */
