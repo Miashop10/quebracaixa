@@ -1195,12 +1195,54 @@ async function diagnosticarNuvem(){
     forcarEnvioNuvem();
   }
 }
-// Força o envio do banco local para a nuvem (mescla com o remoto e grava).
+// Força o envio do banco local para a nuvem, MOSTRANDO o resultado real (p/ diagnóstico).
 async function forcarEnvioNuvem(){
+  const cfg=getCloudCfg();
+  if(!cfg){ alert('Sem nuvem configurada.'); return; }
   setSyncStatus(true,'Forçando envio…');
-  const ok=await cloudSave();
-  if(ok) toast('Dados deste aparelho enviados para a nuvem.','ok');
-  else toast('Não consegui enviar agora. Verifique a internet e tente de novo.','bad');
+  try{
+    // 1) lê o remoto e mescla (igual ao cloudSave), p/ não perder dados de outras filiais
+    let remoto=null;
+    try{
+      const rr=await fetch(cfg.url+'?action=load',{method:'GET',cache:'no-store'});
+      const dd=await rr.json(); if(dd&&dd.ok&&dd.db) remoto=normalizeDB(dd.db);
+    }catch(e){}
+    if(remoto) DB=mergeDB(remoto, DB);
+    localStorage.setItem(DB_KEY, JSON.stringify(DB));
+
+    const corpo=JSON.stringify({action:'save', token:cfg.token, db:DB});
+    const tamanho=(corpo.length/1024).toFixed(0);
+    // 2) grava
+    const res=await fetch(cfg.url,{
+      method:'POST',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body:corpo
+    });
+    let texto='';
+    try{ texto=await res.text(); }catch(e){ texto='(sem corpo)'; }
+    let ok=false; try{ ok=JSON.parse(texto).ok===true; }catch(e){}
+
+    // 3) confere relendo da nuvem
+    let nuvemFech='?';
+    try{
+      const rc=await fetch(cfg.url+'?action=load',{method:'GET',cache:'no-store'});
+      const dc=await rc.json(); if(dc&&dc.ok&&dc.db) nuvemFech=(dc.db.fechamentos||[]).length;
+    }catch(e){}
+
+    setSyncStatus(ok, ok?'Sincronizado ✓':'Falha ao gravar na nuvem.');
+    alert('=== RESULTADO DO ENVIO ===\n\n'+
+          'Status HTTP: '+res.status+'\n'+
+          'Tamanho enviado: ~'+tamanho+' KB\n'+
+          'Resposta do servidor: '+(texto||'(vazia)').slice(0,300)+'\n\n'+
+          'Fechamentos NESTE aparelho: '+(DB.fechamentos||[]).length+'\n'+
+          'Fechamentos NA NUVEM agora: '+nuvemFech+'\n\n'+
+          (ok && String(nuvemFech)===String((DB.fechamentos||[]).length)
+            ? '✅ Envio confirmado! Agora sincronize o outro computador.'
+            : '⚠ A gravação NÃO foi confirmada. Copie esta tela e mostre para o suporte.'));
+  }catch(e){
+    setSyncStatus(false,'Erro de conexão.');
+    alert('ERRO ao enviar: '+e.message+'\n\nIsso indica problema de rede/conexão neste computador com o Google Apps Script.');
+  }
 }
 
 /* ---------- Controle de abas por papel ---------- */
