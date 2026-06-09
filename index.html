@@ -462,6 +462,8 @@ body.role-master .wrap{max-width:1400px}
     <div class="user-chip">
       <span>Filial: <b id="curFilial">—</b></span>
       <span class="badge" id="roleBadge">FILIAL</span>
+      <span id="syncStatus" style="font-size:11px;color:var(--txt-dim)" title="Estado da sincronização com a nuvem"></span>
+      <button class="btn sec small" id="syncBtn" title="Forçar sincronização agora" style="width:auto">↻</button>
       <button class="tab tab-config" data-page="config" data-master title="Filiais & Caixas">⚙ Filiais</button>
       <button class="btn sec small" id="logoutBtn">Sair</button>
     </div>
@@ -823,12 +825,11 @@ function save(){
 }
 
 /* ---------- Sincronização com a nuvem ---------- */
-let CLOUD_BUSY=false;
 // Carrega o banco da nuvem (chamado no login). Se vazio, sobe o banco local atual.
 async function cloudLoad(){
   const cfg=getCloudCfg(); if(!cfg) return false;
   try{
-    const res=await fetch(cfg.url+'?action=load',{method:'GET'});
+    const res=await fetch(cfg.url+'?action=load',{method:'GET',cache:'no-store'});
     const data=await res.json();
     if(data && data.ok){
       if(data.db){
@@ -850,32 +851,62 @@ async function cloudLoad(){
   }catch(e){ console.warn('cloudLoad falhou', e); }
   return false;
 }
-// Envia o banco atual para a nuvem. Faz merge com a versão remota p/ não apagar
-// lançamentos feitos por outra filial ao mesmo tempo.
+// Controle de sincronização: garante que NENHUM salvamento seja descartado.
+// Se um save é pedido enquanto outro está em andamento, marca "pendente" e
+// executa novamente ao terminar — assim todo lançamento chega à nuvem.
+let CLOUD_BUSY=false;
+let CLOUD_PENDING=false;
+let CLOUD_LAST_OK=true;
+
+function setSyncStatus(ok, txt){
+  CLOUD_LAST_OK=ok;
+  const el=$('syncStatus');
+  if(el){
+    el.textContent = txt || (ok?'Sincronizado ✓':'Falha ao sincronizar — tentando de novo…');
+    el.style.color = ok ? 'var(--txt-dim)' : 'var(--red)';
+  }
+}
+
+// Envia o banco atual para a nuvem, mesclando com o remoto p/ não apagar dados de outras filiais.
 async function cloudSave(){
   const cfg=getCloudCfg(); if(!cfg) return false;
-  if(CLOUD_BUSY) return false; CLOUD_BUSY=true;
+  if(CLOUD_BUSY){ CLOUD_PENDING=true; return false; } // já há um save rodando: agenda outro
+  CLOUD_BUSY=true;
+  let okFinal=false;
   try{
+    setSyncStatus(true,'Sincronizando…');
     // 1) puxa a versão remota mais recente
     let remoto=null;
     try{
-      const r=await fetch(cfg.url+'?action=load',{method:'GET'});
+      const r=await fetch(cfg.url+'?action=load',{method:'GET',cache:'no-store'});
       const d=await r.json();
       if(d&&d.ok&&d.db) remoto=normalizeDB(d.db);
     }catch(e){}
-    // 2) mescla os registros (remoto + local) por id, mantendo o mais recente
+    // 2) mescla (remoto + local) e guarda local
     if(remoto) DB=mergeDB(remoto, DB);
     localStorage.setItem(DB_KEY, JSON.stringify(DB));
-    // 3) grava o resultado
+    // 3) grava o resultado na nuvem
     const res=await fetch(cfg.url,{
       method:'POST',
       headers:{'Content-Type':'text/plain;charset=utf-8'}, // text/plain evita preflight CORS
       body:JSON.stringify({action:'save', token:cfg.token, db:DB})
     });
     const out=await res.json();
+    okFinal = !!(out && out.ok);
+    setSyncStatus(okFinal, okFinal?'Sincronizado ✓':'A nuvem respondeu com erro.');
+  }catch(e){
+    console.warn('cloudSave falhou', e);
+    setSyncStatus(false,'Sem conexão com a nuvem — dados salvos no aparelho.');
+    okFinal=false;
+  }finally{
     CLOUD_BUSY=false;
-    return out && out.ok;
-  }catch(e){ CLOUD_BUSY=false; console.warn('cloudSave falhou', e); return false; }
+    // se chegaram pedidos enquanto salvávamos, OU se falhou, tenta de novo
+    if(CLOUD_PENDING || !okFinal){
+      CLOUD_PENDING=false;
+      setTimeout(()=>{ cloudSave(); }, okFinal?0:4000); // se falhou, espera 4s e re-tenta
+    }
+  }
+  return okFinal;
 }
 // Mescla dois bancos: listas por id (o ts maior vence), e configs do "local" prevalecem.
 function mergeDB(remoto, local){
@@ -1025,22 +1056,26 @@ function normCx(s){
 // Registros antigos sem data são aceitos como fallback.
 function acharImportado(arr, fNome, cNome, data){
   const fF=normCx(fNome), cF=normCx(cNome);
-  const dataOk = x => !data || !x.data || x.data===data;
-  const filMatch = xf => xf===fF || xf.includes(fF) || fF.includes(xf);
   const cxMatch  = xc => xc===cF || xc.includes(cF) || cF.includes(xc);
-  // se o registro não tem caixa, basta a filial casar
   const semCaixa = x => x.caixa==null || String(x.caixa).trim()==='';
+  const filOk = x => normCx(x.filial)===fF;                  // filial EXATA
+  const cxOk  = x => semCaixa(x) || normCx(x.caixa)===cF || cxMatch(normCx(x.caixa));
 
-  // 1) exato: filial + (caixa, ou filial-só quando o registro não tem caixa) respeitando a data
-  let r = arr.find(x => dataOk(x) && normCx(x.filial)===fF && (semCaixa(x) || normCx(x.caixa)===cF));
-  if(r) return r;
-  // 2) parcial
-  r = arr.find(x => {
-    if(!dataOk(x)) return false;
-    if(!filMatch(normCx(x.filial))) return false;
-    return semCaixa(x) || cxMatch(normCx(x.caixa));
-  });
-  return r||null;
+  // candidatos da filial+caixa, sem olhar a data ainda
+  const cands = arr.filter(x => filOk(x) && cxOk(x));
+  if(!cands.length) return null;
+
+  if(data){
+    // 1º) preferência ABSOLUTA: registro com a data EXATA selecionada
+    const exato = cands.find(x => x.data===data);
+    if(exato) return exato;
+    // 2º) se não há da data exata, NÃO usa registros de OUTRA data (evita valor errado).
+    //     só aceita registros SEM data (legado), como último recurso.
+    const semData = cands.find(x => !x.data);
+    return semData || null;
+  }
+  // sem data informada: primeiro candidato
+  return cands[0];
 }
 
 function toast(msg, type){
@@ -1114,6 +1149,16 @@ $('logoutBtn').onclick=()=>{
   SESSION={master:false,filialId:null};
   $('app').style.display='none'; $('login').style.display='flex';
   $('loginPass').value=''; refreshLoginFiliais();
+};
+// botão de sincronizar agora: puxa a nuvem, mescla e re-renderiza
+if($('syncBtn')) $('syncBtn').onclick=async ()=>{
+  if(!cloudAtivo()){ toast('Nuvem não configurada neste aparelho.','bad'); return; }
+  setSyncStatus(true,'Sincronizando…');
+  await cloudSave();          // garante que o que está aqui suba
+  await cloudLoad();          // traz o que outras filiais lançaram
+  initFechamento(); renderAll();
+  if(typeof renderCalendar==='function') renderCalendar();
+  toast('Sincronizado com a nuvem.','ok');
 };
 
 /* ---------- Controle de abas por papel ---------- */
@@ -1770,13 +1815,38 @@ function excelDateToISO(v){
 
 function renderFiles(){
   const t=$('filesTable');
-  if(!DB.arquivos.length){ t.innerHTML=`<tr><td><div class="empty-state"><div class="em">∅</div>Nenhum arquivo importado.</div></td></tr>`; return; }
+  // detecta registros importados ÓRFÃOS (sem arquivo correspondente) — possíveis "fantasmas"
+  const ids=new Set(DB.arquivos.map(a=>a.id));
+  const orfaos = DB.getnetData.filter(r=>!r.arqId||!ids.has(r.arqId)).length
+               + DB.shop9Data.filter(r=>!r.arqId||!ids.has(r.arqId)).length;
+  const aviso = orfaos>0
+    ? `<tr><td colspan="5"><div class="hint" style="border-left-color:var(--red);margin:0">
+         Há <b>${orfaos}</b> registro(s) importado(s) sem arquivo (de importações antigas) que podem
+         preencher valores errados. <button class="btn danger small" style="width:auto;margin-left:8px"
+         onclick="limparImportadosOrfaos()">Limpar dados órfãos</button></div></td></tr>`
+    : '';
+  if(!DB.arquivos.length){
+    t.innerHTML = aviso + `<tr><td><div class="empty-state"><div class="em">∅</div>Nenhum arquivo importado.</div></td></tr>`;
+    return;
+  }
   const head=`<tr><th>Data/Hora</th><th>Tipo</th><th>Arquivo</th><th>Registros</th><th>Ação</th></tr>`;
   const body=DB.arquivos.slice().reverse().map(a=>`<tr>
     <td>${new Date(a.ts).toLocaleString('pt-BR')}</td><td>${a.tipo}</td><td>${a.nome}</td><td>${a.registros}</td>
     <td class="acts"><button class="btn danger small" style="width:auto" onclick="delArquivo('${a.id}')">Excluir</button></td>
   </tr>`).join('');
-  t.innerHTML=head+body;
+  t.innerHTML=aviso+head+body;
+}
+// remove registros importados que não pertencem a nenhum arquivo da lista (fantasmas de versões antigas)
+function limparImportadosOrfaos(){
+  askMaster('Remover os dados importados antigos que não têm arquivo na lista? Isso elimina valores fantasmas (ex.: GetNet errado da Bacacheri).', ()=>{
+    const ids=new Set(DB.arquivos.map(a=>a.id));
+    const antes=DB.getnetData.length+DB.shop9Data.length;
+    DB.getnetData=DB.getnetData.filter(r=>r.arqId && ids.has(r.arqId));
+    DB.shop9Data =DB.shop9Data.filter(r=>r.arqId && ids.has(r.arqId));
+    const removidos=antes-(DB.getnetData.length+DB.shop9Data.length);
+    save(); renderFiles();
+    toast(removidos>0?`${removidos} registro(s) órfão(s) removido(s).`:'Nenhum dado órfão encontrado.','ok');
+  });
 }
 // exclui um arquivo importado, os dados que ele trouxe E as conferências que dependiam deles
 function delArquivo(arqId){
