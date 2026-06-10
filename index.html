@@ -867,7 +867,9 @@ function setSyncStatus(ok, txt){
   }
 }
 
-// Envia o banco atual para a nuvem, mesclando com o remoto p/ não apagar dados de outras filiais.
+// Envia o banco atual para a nuvem usando MERGE ATÔMICO no servidor:
+// o Apps Script funde nossos dados com os das outras filiais dentro de um lock,
+// então gravações simultâneas não se sobrescrevem.
 async function cloudSave(){
   const cfg=getCloudCfg(); if(!cfg) return false;
   if(CLOUD_BUSY){ CLOUD_PENDING=true; return false; } // já há um save rodando: agenda outro
@@ -875,24 +877,20 @@ async function cloudSave(){
   let okFinal=false;
   try{
     setSyncStatus(true,'Sincronizando…');
-    // 1) puxa a versão remota mais recente
-    let remoto=null;
-    try{
-      const r=await fetch(cfg.url+'?action=load',{method:'GET',cache:'no-store'});
-      const d=await r.json();
-      if(d&&d.ok&&d.db) remoto=normalizeDB(d.db);
-    }catch(e){}
-    // 2) mescla (remoto + local) e guarda local
-    if(remoto) DB=mergeDB(remoto, DB);
     localStorage.setItem(DB_KEY, JSON.stringify(DB));
-    // 3) grava o resultado na nuvem
+    // envia o nosso banco como "patch"; o servidor mescla com o que já existe
     const res=await fetch(cfg.url,{
       method:'POST',
       headers:{'Content-Type':'text/plain;charset=utf-8'}, // text/plain evita preflight CORS
-      body:JSON.stringify({action:'save', token:cfg.token, db:DB})
+      body:JSON.stringify({action:'merge', token:cfg.token, patch:DB})
     });
     const out=await res.json();
     okFinal = !!(out && out.ok);
+    // o servidor devolve o banco já mesclado: adotamos como nossa versão local
+    if(okFinal && out.db){
+      DB=normalizeDB(out.db);
+      localStorage.setItem(DB_KEY, JSON.stringify(DB));
+    }
     setSyncStatus(okFinal, okFinal?'Sincronizado ✓':'A nuvem respondeu com erro.');
   }catch(e){
     console.warn('cloudSave falhou', e);
@@ -1201,18 +1199,10 @@ async function forcarEnvioNuvem(){
   if(!cfg){ alert('Sem nuvem configurada.'); return; }
   setSyncStatus(true,'Forçando envio…');
   try{
-    // 1) lê o remoto e mescla (igual ao cloudSave), p/ não perder dados de outras filiais
-    let remoto=null;
-    try{
-      const rr=await fetch(cfg.url+'?action=load',{method:'GET',cache:'no-store'});
-      const dd=await rr.json(); if(dd&&dd.ok&&dd.db) remoto=normalizeDB(dd.db);
-    }catch(e){}
-    if(remoto) DB=mergeDB(remoto, DB);
     localStorage.setItem(DB_KEY, JSON.stringify(DB));
-
-    const corpo=JSON.stringify({action:'save', token:cfg.token, db:DB});
+    const corpo=JSON.stringify({action:'merge', token:cfg.token, patch:DB});
     const tamanho=(corpo.length/1024).toFixed(0);
-    // 2) grava
+    // grava (merge atômico no servidor)
     const res=await fetch(cfg.url,{
       method:'POST',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
@@ -1220,7 +1210,10 @@ async function forcarEnvioNuvem(){
     });
     let texto='';
     try{ texto=await res.text(); }catch(e){ texto='(sem corpo)'; }
-    let ok=false; try{ ok=JSON.parse(texto).ok===true; }catch(e){}
+    let ok=false, dbVolta=null;
+    try{ const j=JSON.parse(texto); ok=j.ok===true; dbVolta=j.db; }catch(e){}
+    // adota a versão mesclada que o servidor devolveu
+    if(ok && dbVolta){ DB=normalizeDB(dbVolta); localStorage.setItem(DB_KEY, JSON.stringify(DB)); }
 
     // 3) confere relendo da nuvem
     let nuvemFech='?';
