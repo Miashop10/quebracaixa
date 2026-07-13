@@ -633,7 +633,8 @@ body.role-master .wrap{max-width:1400px}
         <div class="filter-bar">
           <h3 style="margin:0">Quebras consolidadas</h3>
           <div class="filters" style="margin:0">
-            <div><label>Data</label><input type="date" id="rData" class="fld" onchange="resumoFiltrar()"></div>
+            <div><label>De</label><input type="date" id="rDataDe" class="fld" onchange="resumoFiltrar()"></div>
+            <div><label>Até</label><input type="date" id="rDataAte" class="fld" onchange="resumoFiltrar()"></div>
             <div><label>Filial</label><select id="rFilial" class="fld" onchange="resumoFiltrar()"></select></div>
             <div style="align-self:flex-end"><button class="btn ghost small" style="width:auto" onclick="limparResumoFiltros()">Limpar</button></div>
           </div>
@@ -651,7 +652,8 @@ body.role-master .wrap{max-width:1400px}
         <div class="filter-bar">
           <h3 style="margin:0">Relatório de depósitos</h3>
           <div class="filters" style="margin:0">
-            <div><label>Data</label><input type="date" id="dFiltData" class="fld" onchange="depFiltrar()"></div>
+            <div><label>De</label><input type="date" id="dFiltDataDe" class="fld" onchange="depFiltrar()"></div>
+            <div><label>Até</label><input type="date" id="dFiltDataAte" class="fld" onchange="depFiltrar()"></div>
             <div><label>Filial</label><select id="dFiltFilial" class="fld" onchange="depFiltrar()"></select></div>
             <div><label>Valor a partir de (R$)</label><input type="number" step="0.01" id="dFiltValor" class="fld" placeholder="0,00" oninput="depFiltrar()"></div>
             <div style="align-self:flex-end"><button class="btn ghost small" style="width:auto" onclick="limparDepFiltros()">Limpar</button></div>
@@ -2164,16 +2166,19 @@ function refreshResumoFiliais(){
   sel.innerHTML='<option value="">Todas</option>'+DB.filiais.map(f=>`<option value="${f.id}">${f.nome}</option>`).join('');
   if(atual) sel.value=atual;
 }
-function limparResumoFiltros(){ if($('rData'))$('rData').value=''; if($('rFilial'))$('rFilial').value=''; PAGES.resumo=1; renderResumo(); }
+function limparResumoFiltros(){ if($('rDataDe'))$('rDataDe').value=''; if($('rDataAte'))$('rDataAte').value=''; if($('rFilial'))$('rFilial').value=''; PAGES.resumo=1; renderResumo(); }
 function resumoFiltrar(){ PAGES.resumo=1; renderResumo(); }
 
 function renderResumo(){
   refreshResumoFiliais();
-  const fData=$('rData')&&$('rData').value;
+  const de=$('rDataDe')&&$('rDataDe').value;     // período: De
+  const ate=$('rDataAte')&&$('rDataAte').value;  // período: Até
   const fFil=$('rFilial')&&$('rFilial').value;
 
   let confs=DB.conferencias.slice();
-  if(fData) confs=confs.filter(c=>c.data===fData);
+  // filtra por período (datas em aaaa-mm-dd comparam bem como texto)
+  if(de)  confs=confs.filter(c=>c.data>=de);
+  if(ate) confs=confs.filter(c=>c.data<=ate);
   if(fFil) confs=confs.filter(c=>c.filialId===fFil);
 
   // ---- Consolidado por filial+dia (soma as quebras dos caixas; compensa sobra x falta) ----
@@ -2241,7 +2246,7 @@ function renderResumo(){
 
   const foot=`<tr class="resumo-total">
     <td></td>
-    <td colspan="2"><b>TOTAL${(fData||fFil)?' (filtrado)':''}</b></td>
+    <td colspan="2"><b>TOTAL${(de||ate||fFil)?' (filtrado)':''}</b></td>
     <td></td>
     <td data-label="Soma Quebra Dinheiro">${quebraSpan(totDin)}</td>
     <td data-label="Soma Quebra Cartão">${quebraSpan(totCart)}</td>
@@ -2307,7 +2312,8 @@ function renderDepReport(){
     selFil.innerHTML='<option value="">Todas</option>'+DB.filiais.map(f=>`<option value="${f.id}">${f.nome}</option>`).join('');
     selFil.value=atual;
   }
-  const fData=$('dFiltData')&&$('dFiltData').value;
+  const de=$('dFiltDataDe')&&$('dFiltDataDe').value;     // período: De
+  const ate=$('dFiltDataAte')&&$('dFiltDataAte').value;  // período: Até
   const fFil=$('dFiltFilial')&&$('dFiltFilial').value;
   const fValor=$('dFiltValor')&&parseFloat($('dFiltValor').value);
 
@@ -2318,8 +2324,9 @@ function renderDepReport(){
       if(v>0) list.push({key:r.id+'_'+idx, data:r.data, filialId:r.filialId, valor:v, comprovantes:r.comprovantes||[]});
     });
   });
-  // aplica filtros
-  if(fData) list=list.filter(d=>d.data===fData);
+  // aplica filtros (datas aaaa-mm-dd comparam bem como texto)
+  if(de)  list=list.filter(d=>d.data>=de);
+  if(ate) list=list.filter(d=>d.data<=ate);
   if(fFil) list=list.filter(d=>d.filialId===fFil);
   if(!isNaN(fValor)&&fValor>0) list=list.filter(d=>d.valor>=fValor);
 
@@ -2345,13 +2352,14 @@ function renderDepReport(){
       <td><button class="btn danger small" style="width:auto" onclick="delDeposito('${d.key}')">Excluir</button></td>
     </tr>`;
   }).join('');
-  const foot=`<tr class="resumo-total"><td></td><td colspan="2"><b>TOTAL${(fData||fFil||(!isNaN(fValor)&&fValor>0))?' (filtrado)':''}</b></td><td><b>${fmt(tot)}</b></td><td></td><td></td></tr>`;
+  const foot=`<tr class="resumo-total"><td></td><td colspan="2"><b>TOTAL${(de||ate||fFil||(!isNaN(fValor)&&fValor>0))?' (filtrado)':''}</b></td><td><b>${fmt(tot)}</b></td><td></td><td></td></tr>`;
   t.innerHTML=head+body+foot;
   if($('depPag')) $('depPag').innerHTML=pagControls('dep', info, 'renderDepReport');
 }
 function depFiltrar(){ PAGES.dep=1; renderDepReport(); }
 function limparDepFiltros(){
-  if($('dFiltData'))$('dFiltData').value='';
+  if($('dFiltDataDe'))$('dFiltDataDe').value='';
+  if($('dFiltDataAte'))$('dFiltDataAte').value='';
   if($('dFiltFilial'))$('dFiltFilial').value='';
   if($('dFiltValor'))$('dFiltValor').value='';
   PAGES.dep=1; renderDepReport();
