@@ -1207,32 +1207,34 @@ if($('syncStatus')) $('syncStatus').onclick=diagnosticarNuvem;
 async function diagnosticarNuvem(){
   const cfg=getCloudCfg();
   if(!cfg){ alert('Este aparelho não está conectado à nuvem (sem URL configurada).'); return; }
-  let remoto=null, erro=null;
+  let remoto=null, erro=null, versao=null;
   try{
     const r=await fetch(cfg.url+'?action=load',{method:'GET',cache:'no-store'});
     const d=await r.json();
     if(d&&d.ok){ remoto=d.db; } else { erro='A nuvem respondeu com erro: '+(d&&d.error||'desconhecido'); }
   }catch(e){ erro='Não consegui conectar à nuvem: '+e.message; }
+  // consulta a versão do backend (se responder, é a versão nova com merge)
+  try{
+    const rv=await fetch(cfg.url+'?action=version',{method:'GET',cache:'no-store'});
+    const dv=await rv.json();
+    if(dv&&dv.ok&&dv.version) versao=dv.version;
+  }catch(e){}
 
-  // datas de fechamento de uma filial específica (p/ ver se o lançamento de hoje subiu)
-  const datasDe=(db, nomeParcial)=>{
-    if(!db) return '(sem dados)';
-    const fil=(db.filiais||[]).find(f=>norm(f.nome).includes(norm(nomeParcial)));
-    if(!fil) return '(filial não encontrada)';
-    const ds=(db.fechamentos||[]).filter(f=>f.filialId===fil.id).map(f=>f.data).sort().reverse();
-    return ds.length? ds.join(', ') : '(nenhum)';
+  // contagem geral do banco
+  const cont=(db)=>db? `filiais=${(db.filiais||[]).length} | caixas=${(db.caixas||[]).length} | fechamentos=${(db.fechamentos||[]).length} | conferências=${(db.conferencias||[]).length}`:'(vazio)';
+  // lista os nomes de caixa (p/ ver se um caixa novo está na nuvem)
+  const caixasDe=(db)=>{
+    if(!db||!db.caixas) return '(sem dados)';
+    return db.caixas.map(c=>{ const f=(db.filiais||[]).find(x=>x.id===c.filialId); return (f?f.nome:'?')+' / '+c.nome; }).join('\n   ') || '(nenhum)';
   };
-
-  const cont=(db)=>db? `filiais=${(db.filiais||[]).length} | fechamentos=${(db.fechamentos||[]).length} | conferências=${(db.conferencias||[]).length}`:'(vazio)';
 
   let msg='=== DIAGNÓSTICO DE SINCRONIZAÇÃO ===\n\n';
   if(erro){ msg+='⚠ '+erro+'\n\n'; }
+  msg+='VERSÃO DO APPS SCRIPT: '+(versao || '⚠ ANTIGA (não respondeu a versão — REPUBLIQUE o Codigo.gs novo!)')+'\n\n';
   msg+='NA NUVEM:  '+cont(remoto)+'\n';
   msg+='NESTE APARELHO:  '+cont(DB)+'\n\n';
-  msg+='Datas de fechamento da REPÚBLICA 2:\n';
-  msg+=' • na nuvem: '+datasDe(remoto,'republica 2')+'\n';
-  msg+=' • neste aparelho: '+datasDe(DB,'republica 2')+'\n\n';
-  msg+='Deseja FORÇAR o envio dos dados DESTE aparelho para a nuvem agora?\n(Use no computador que TEM os lançamentos que faltam.)';
+  msg+='CAIXAS na nuvem:\n   '+caixasDe(remoto)+'\n\n';
+  msg+='Deseja FORÇAR o envio dos dados DESTE aparelho para a nuvem agora?\n(Use no computador que TEM os dados que faltam.)';
   if(confirm(msg)){
     forcarEnvioNuvem();
   }
