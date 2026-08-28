@@ -164,6 +164,8 @@ p.lead{color:var(--txt-dim);margin-bottom:14px;font-size:12.5px}
 .comp-thumb.loading{display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--txt-dim)}
 /* miniatura na tabela (depósitos / histórico) */
 .comp-mini{width:34px;height:34px;border-radius:6px;object-fit:cover;border:1px solid var(--line);cursor:pointer;vertical-align:middle;background:var(--panel-2)}
+.obs-input{width:100%;min-width:120px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;font-size:13px;background:var(--panel);color:var(--txt)}
+.obs-input:focus{outline:none;border-color:var(--accent)}
 .comp-mini-empty{width:34px;height:34px;border-radius:6px;border:1px dashed var(--line);display:inline-flex;align-items:center;justify-content:center;color:var(--txt-dim);font-size:14px;vertical-align:middle}
 /* lightbox */
 .lightbox{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;align-items:center;justify-content:center;z-index:9999;padding:20px}
@@ -729,10 +731,12 @@ body.role-master .wrap{max-width:1400px}
 
       <div class="card settings-box">
         <h3>Criar caixa</h3>
-        <div class="grid g2">
+        <div class="grid g3">
           <div><label>Filial</label><select id="newCaixaFilial" class="fld"></select></div>
           <div><label>Nome do caixa</label><input type="text" id="newCaixaName" class="fld" placeholder="Ex: Caixa 1"></div>
+          <div><label>Conferir a partir de</label><input type="date" id="newCaixaInicio" class="fld"></div>
         </div>
+        <p class="lead" style="margin:8px 0 0">O calendário só cobrará conferência deste caixa a partir desta data. Deixe em branco para cobrar desde sempre.</p>
         <button class="btn small" style="margin-top:14px;width:auto" onclick="criarCaixa()">Adicionar caixa</button>
       </div>
 
@@ -806,12 +810,15 @@ const CLOUD_CFG_KEY = 'miashop_cloud_cfg'; // (legado) config manual por disposi
 /* ---------- Configuração da nuvem (Apps Script) — EMBUTIDA ----------
    A URL fica fixa aqui, então o sistema já conecta sozinho em qualquer
    dispositivo, sem precisar configurar nada na tela e sem token. */
+/* >>>>>> COLE AQUI A URL DO SEU APPS SCRIPT NOVO (termina em /exec) <<<<<<
+   Exemplo: const CLOUD_URL = 'https://script.google.com/macros/s/AKfyc..../exec';
+   Sem isso, o sistema funciona só neste computador (não sincroniza).            */
 const CLOUD_URL   = 'https://script.google.com/macros/s/AKfycbxAGQ9kw5iTuGzF_tUSbWjzbkI-aacFzGCL0dsJ5_JAwHxi9Nne_Re1xxusL8YKlfF4/exec';
 const CLOUD_TOKEN = ''; // sem token
 
 function getCloudCfg(){
-  // usa a URL embutida se estiver preenchida; senão cai p/ a manual (legado)
-  if(CLOUD_URL){
+  // usa a URL embutida se estiver preenchida corretamente
+  if(CLOUD_URL && CLOUD_URL.indexOf('script.google.com')>=0){
     return { url:CLOUD_URL.trim(), token:(CLOUD_TOKEN||'').trim() };
   }
   try{ const r=localStorage.getItem(CLOUD_CFG_KEY); return r?JSON.parse(r):null; }catch(e){ return null; }
@@ -823,11 +830,42 @@ function setCloudCfg(url, token){
 function cloudAtivo(){ return !!getCloudCfg(); }
 
 /* ---------- Estado / banco ---------- */
+// Filiais e caixas iniciais (pré-cadastrados). Senha da filial = número da filial (troque na tela).
+function seedFiliaisCaixas(){
+  // [nome da filial, senha, [caixas...]]
+  const dados=[
+    ['PONTA GROSSA','1',['Caixa 1','Caixa Retaguarda']],
+    ['PADRE ANCHIETA','2',['Caixa 1']],
+    ['JARDIM DAS AMERICAS','4',['Caixa 1','Caixa Retaguarda']],
+    ['UMUARAMA','5',['Caixa 01 Umuarama','Caixa 02 Umuarama']],
+    ['REPUBLICA ARGENTINA','6',['Caixa 01']],
+    ['BATEL 02','7',['Caixa 01']],
+    ['PADRE ANCHIETA 02','8',['Caixa 01','Caixa 02','Caixa 03']],
+    ['BATEL','9',['Caixa 2']],
+    ['VICENTE MACHADO','12',['Caixa 01','Caixa 02']],
+    ['SHOPPING ESTACAO','13',['Caixa 01 Estacao','Caixa 2 Estacao']],
+    ['COLOMBO','14',['Caixa 1','Caixa 2']],
+    ['LONDRINA','15',['Caixa 1 Londrina','Caixa 3 Londrina']],
+    ['TIJUCAS','17',['Caixa Tijucas']],
+    ['ITAPOA','18',['Caixa 1']],
+    ['BACACHERI','19',['Caixa 1']],
+    ['REPUBLICA 2','20',['Caixa Republica 2']]
+  ];
+  const filiais=[], caixas=[];
+  dados.forEach((d,i)=>{
+    const fid='fil'+(i+1);
+    filiais.push({id:fid, nome:d[0], senha:d[1]});
+    d[2].forEach((cx,j)=>{ caixas.push({id:fid+'_cx'+(j+1), filialId:fid, nome:cx}); });
+  });
+  return {filiais, caixas};
+}
+
 function defaultDB(){
+  const seed=seedFiliaisCaixas();
   return {
     masterPass: 'HERA',
-    filiais: [],          // {id, nome, senha}
-    caixas: [],           // {id, filialId, nome}
+    filiais: seed.filiais,     // pré-cadastradas (senha = número da filial)
+    caixas: seed.caixas,       // pré-cadastrados
     fechamentos: [],      // {id, data, filialId, caixaId, valorFinal, depositos:[], despesas:[{v,d}], ecom:[{v,d}], comprovantes:[{id,img,view}], ts}
     conferencias: [],     // {id, data, filialId, caixaId, vendaDin, fechamento, esperado, quebraDin, shop9, getnet, pix, senff, somaCart, quebraCart, ts}
     depChecks: {},        // depId -> true
@@ -835,6 +873,7 @@ function defaultDB(){
     getnetData: [],       // {filial, caixa, getnet, pix, senff}
     shop9Data: [],        // {filial, caixa, dinheiro, shop9}
     semMov: {},           // "data|filialId|caixaId" -> true (caixa sem movimentação naquele dia)
+    resumoObs: {},        // "data|filialId" -> texto de observação (aba Resumo)
     deleted: { fechamentos:[], conferencias:[], arquivos:[], filiais:[], caixas:[] } // "lápides": ids excluídos (p/ não voltarem na sincronização)
   };
 }
@@ -983,6 +1022,7 @@ function mergeDB(remoto, local){
   // mapas simples: une as chaves (local prevalece)
   out.depChecks=Object.assign({}, out.depChecks||{}, L.depChecks||{});
   out.semMov=Object.assign({}, out.semMov||{}, L.semMov||{});
+  out.resumoObs=Object.assign({}, out.resumoObs||{}, L.resumoObs||{});
   // dados importados: une os dois lados por arquivo (arqId), respeitando lápides de arquivo.
   // Assim importações de dispositivos diferentes coexistem, e um arquivo excluído não volta.
   const arqVivos = new Set((out.arquivos||[]).map(a=>a.id));      // arquivos que sobreviveram ao merge
@@ -1564,7 +1604,8 @@ function renderHistFilters(){
   const box=$('histFilters'); box.innerHTML='';
   if(SESSION.master){
     box.innerHTML=`
-      <div><label>Data</label><input type="date" id="hfData" class="fld" onchange="histFiltrar()"></div>
+      <div><label>De</label><input type="date" id="hfDataDe" class="fld" onchange="histFiltrar()"></div>
+      <div><label>Até</label><input type="date" id="hfDataAte" class="fld" onchange="histFiltrar()"></div>
       <div><label>Filial</label><select id="hfFilial" class="fld" onchange="histFiltrar()">
         <option value="">Todas</option>
         ${DB.filiais.map(f=>`<option value="${f.id}">${f.nome}</option>`).join('')}
@@ -1573,7 +1614,7 @@ function renderHistFilters(){
   }
 }
 function histFiltrar(){ PAGES.hist=1; renderHistorico(); }
-function clearHistFilters(){ if($('hfData'))$('hfData').value=''; if($('hfFilial'))$('hfFilial').value=''; PAGES.hist=1; renderHistorico(); }
+function clearHistFilters(){ if($('hfDataDe'))$('hfDataDe').value=''; if($('hfDataAte'))$('hfDataAte').value=''; if($('hfFilial'))$('hfFilial').value=''; PAGES.hist=1; renderHistorico(); }
 
 function renderHistorico(){
   const t=$('histTable');
@@ -1584,8 +1625,9 @@ function renderHistorico(){
   );
   if(!SESSION.master) rows=rows.filter(r=>r.filialId===SESSION.filialId);
   if(SESSION.master){
-    const fd=$('hfData')&&$('hfData').value, ff=$('hfFilial')&&$('hfFilial').value;
-    if(fd) rows=rows.filter(r=>r.data===fd);
+    const de=$('hfDataDe')&&$('hfDataDe').value, ate=$('hfDataAte')&&$('hfDataAte').value, ff=$('hfFilial')&&$('hfFilial').value;
+    if(de)  rows=rows.filter(r=>r.data>=de);
+    if(ate) rows=rows.filter(r=>r.data<=ate);
     if(ff) rows=rows.filter(r=>r.filialId===ff);
   }
   if(!rows.length){ t.innerHTML=`<tr><td><div class="empty-state"><div class="em">∅</div>Nenhum lançamento ainda.</div></td></tr>`; if($('histPag'))$('histPag').innerHTML=''; return; }
@@ -2215,7 +2257,7 @@ function renderResumo(){
   // ---- Paginação dos grupos (10 por página) ----
   const info=paginate('resumo', linhas);
 
-  const head=`<tr><th></th><th>Data</th><th>Filial</th><th>Caixas</th><th>Quebra Dinheiro</th><th>Quebra Cartão</th><th>Total</th></tr>`;
+  const head=`<tr><th></th><th>Data</th><th>Filial</th><th>Caixas</th><th>Quebra Dinheiro</th><th>Quebra Cartão</th><th>Total</th><th>Observação</th></tr>`;
   const body=info.itens.map(l=>{
     const total=Math.round((l.qDin+l.qCart)*100)/100;
     const cls=l.key.replace(/[^a-zA-Z0-9]/g,'');
@@ -2233,7 +2275,10 @@ function renderResumo(){
           <button class="btn ghost small" style="width:auto" onclick="editConferencia('${c.id}')">Editar</button>
           <button class="btn danger small" style="width:auto" onclick="delConferencia('${c.id}')">Excluir</button>
         </td>
+        <td data-label=""></td>
       </tr>`).join('');
+    const obsKey=l.data+'|'+l.filialId;
+    const obsVal=(DB.resumoObs&&DB.resumoObs[obsKey])||'';
     const grupo=`<tr>
       <td><button class="btn ghost small" style="width:auto;padding:4px 9px" onclick="toggleResumoGrupo('${cls}',this)">▸</button></td>
       <td data-label="Data">${fmtDate(l.data)}</td>
@@ -2242,6 +2287,7 @@ function renderResumo(){
       <td data-label="Quebra Dinheiro">${quebraSpan(l.qDin)}</td>
       <td data-label="Quebra Cartão">${quebraSpan(l.qCart)}</td>
       <td data-label="Total">${quebraSpan(total)}</td>
+      <td data-label="Observação"><input type="text" class="obs-input" value="${obsVal.replace(/"/g,'&quot;')}" placeholder="anotação…" onchange="salvarResumoObs('${obsKey}', this.value)"></td>
     </tr>`;
     return grupo+filhas;
   }).join('');
@@ -2253,9 +2299,17 @@ function renderResumo(){
     <td data-label="Soma Quebra Dinheiro">${quebraSpan(totDin)}</td>
     <td data-label="Soma Quebra Cartão">${quebraSpan(totCart)}</td>
     <td data-label="Soma Total">${quebraSpan(totGeral)}</td>
+    <td></td>
   </tr>`;
   t.innerHTML=head+body+foot;
   if($('resumoPag')) $('resumoPag').innerHTML=pagControls('resumo', info, 'renderResumo');
+}
+// salva a observação de um grupo (data|filialId) do Resumo e sincroniza
+function salvarResumoObs(key, texto){
+  if(!DB.resumoObs) DB.resumoObs={};
+  const t=(texto||'').trim();
+  if(t) DB.resumoObs[key]=t; else delete DB.resumoObs[key];
+  save();
 }
 // expande/recolhe as linhas de caixa (lançamentos) de um grupo filial/dia
 function toggleResumoGrupo(cls, btn){
@@ -2407,6 +2461,15 @@ function isSemMov(ds,fid,cid){ return !!DB.semMov[semMovKey(ds,fid,cid)]; }
 // um caixa está "resolvido" no dia se foi conferido OU marcado sem movimentação
 function caixaResolvido(ds,fid,cid){ return isConferido(ds,fid,cid) || isSemMov(ds,fid,cid); }
 
+// Um caixa só "vale" para o calendário a partir da sua data de início ("inicio").
+// Em dias ANTERIORES ao início, o caixa é ignorado (não deixa o dia vermelho).
+// Caixas sem data de início (cadastrados antes deste recurso) valem para todos os dias.
+function caixaAtivoNoDia(caixa, ds){
+  if(!caixa) return false;
+  if(!caixa.inicio) return true;      // sem data de início: sempre ativo (comportamento antigo)
+  return ds >= caixa.inicio;          // datas em aaaa-mm-dd comparam bem como texto
+}
+
 // status do dia considerando TODOS os caixas cadastrados:
 //  'none'    -> nada resolvido ainda (nenhuma conferência nem marcação)
 //  'done'    -> todos os caixas (que contam) estão resolvidos
@@ -2416,6 +2479,7 @@ function dayStatus(ds){
   if(!caixas.length) return 'none';
   let totalConta=0, resolvidos=0, algumResolvido=false;
   caixas.forEach(c=>{
+    if(!caixaAtivoNoDia(c, ds)) return; // caixa ainda não existia neste dia: ignora
     const sm=isSemMov(ds,c.filialId,c.id);
     const conf=isConferido(ds,c.filialId,c.id);
     if(conf||sm) algumResolvido=true;
@@ -2436,6 +2500,7 @@ function filialStatusDia(ds, fid){
   if(!caixas.length) return 'none';
   let totalConta=0, conferidos=0, algum=false;
   caixas.forEach(c=>{
+    if(!caixaAtivoNoDia(c, ds)) return; // caixa ainda não existia neste dia: ignora
     const sm=isSemMov(ds,fid,c.id), conf=isConferido(ds,fid,c.id);
     if(sm||conf) algum=true;
     if(sm) return;
@@ -2488,9 +2553,10 @@ function calDetail(ds){
 
     // CAIXAS da filial (aparecem só quando expandida)
     if(aberta){
-      const caixas=DB.caixas.filter(c=>c.filialId===f.id).sort((a,b)=>a.nome.localeCompare(b.nome));
+      // mostra só os caixas que já existiam neste dia (respeita a data de início)
+      const caixas=DB.caixas.filter(c=>c.filialId===f.id && caixaAtivoNoDia(c, ds)).sort((a,b)=>a.nome.localeCompare(b.nome));
       if(!caixas.length){
-        html+=`<div class="list-item cx-sub"><div class="info muted">Nenhum caixa cadastrado nesta filial.</div></div>`;
+        html+=`<div class="list-item cx-sub"><div class="info muted">Nenhum caixa ativo nesta filial neste dia.</div></div>`;
       }
       caixas.forEach(c=>{
         const conf=isConferido(ds,f.id,c.id);
@@ -2593,11 +2659,15 @@ function criarFilial(){
 }
 function criarCaixa(){
   const fid=$('newCaixaFilial').value, nome=$('newCaixaName').value.trim();
+  const inicio=($('newCaixaInicio')&&$('newCaixaInicio').value)||''; // aaaa-mm-dd ou vazio
   if(!fid||!nome){ toast('Escolha a filial e o nome do caixa.','bad'); return; }
-  DB.caixas.push({id:uid(),filialId:fid,nome}); save();
+  const caixa={id:uid(),filialId:fid,nome};
+  if(inicio) caixa.inicio=inicio;   // só grava se informada
+  DB.caixas.push(caixa); save();
   $('newCaixaName').value='';
+  if($('newCaixaInicio')) $('newCaixaInicio').value='';
   renderConfig(); refreshCaixaSelect();
-  toast('Caixa criado.','ok');
+  toast(inicio?`Caixa criado (conferência a partir de ${fmtDate(inicio)}).`:'Caixa criado.','ok');
 }
 /* ---------- Ações de configuração da nuvem (somente master) ---------- */
 function salvarCloudCfg(){
@@ -2649,7 +2719,7 @@ function renderConfig(){
   // lista caixas
   $('caixasList').innerHTML = DB.caixas.length ? DB.caixas.map(c=>`
     <div class="list-item">
-      <div class="info"><b>${c.nome}</b><span>${filialNome(c.filialId)}</span></div>
+      <div class="info"><b>${c.nome}</b><span>${filialNome(c.filialId)}${c.inicio?' · conferir a partir de '+fmtDate(c.inicio):''}</span></div>
       <div class="acts">
         <button class="btn ghost small" style="width:auto" onclick="editCaixa('${c.id}')">Editar</button>
         <button class="btn danger small" style="width:auto" onclick="delCaixa('${c.id}')">Excluir</button>
@@ -2678,6 +2748,14 @@ function editCaixa(id){
   askMaster('Editar caixa exige senha master.', ()=>{
     const c=DB.caixas.find(x=>x.id===id); if(!c)return;
     const nome=prompt('Nome do caixa:',c.nome); if(nome===null)return;
+    // data de início: aceita aaaa-mm-dd; em branco = remove (cobra desde sempre)
+    const ini=prompt('Conferir a partir de (aaaa-mm-dd) — deixe em branco para cobrar desde sempre:', c.inicio||'');
+    if(ini!==null){
+      const v=ini.trim();
+      if(v==='') delete c.inicio;
+      else if(/^\d{4}-\d{2}-\d{2}$/.test(v)) c.inicio=v;
+      else { toast('Data inválida. Use o formato aaaa-mm-dd (ex.: 2026-08-28).','bad'); }
+    }
     c.nome=nome.trim()||c.nome; save(); renderConfig(); refreshCaixaSelect(); toast('Caixa atualizado.','ok');
   });
 }
