@@ -902,9 +902,19 @@ function tombstone(key, id){
 }
 
 // Salva localmente (sempre) e, se a nuvem estiver ativa, envia para a planilha.
+// Salva LOCAL na hora (rápido) e agenda o envio à nuvem para logo em seguida,
+// agrupando vários saves seguidos em um único envio (debounce). O usuário nunca
+// espera a rede: a confirmação é instantânea e a sincronização acontece sozinha.
+let SAVE_DEBOUNCE=null;
 function save(){
-  localStorage.setItem(DB_KEY, JSON.stringify(DB));
-  if(cloudAtivo()) cloudSave();
+  localStorage.setItem(DB_KEY, JSON.stringify(DB)); // grava local imediatamente
+  if(cloudAtivo()) agendarCloudSave();
+}
+// agrupa saves próximos (ex.: lançar 3 coisas seguidas) em 1 envio à nuvem
+function agendarCloudSave(){
+  if(SAVE_DEBOUNCE) clearTimeout(SAVE_DEBOUNCE);
+  setSyncStatus(true,'Salvo ✓ — sincronizando…'); // já mostra que salvou local
+  SAVE_DEBOUNCE=setTimeout(()=>{ SAVE_DEBOUNCE=null; cloudSave(); }, 800);
 }
 
 /* ---------- Sincronização com a nuvem ---------- */
@@ -959,7 +969,8 @@ async function cloudSave(){
   CLOUD_BUSY=true;
   let okFinal=false;
   try{
-    setSyncStatus(true,'Sincronizando…');
+    // não sobrescreve o "Salvo ✓ — sincronizando…" com uma mensagem que sugira espera
+    if(!SAVE_DEBOUNCE) setSyncStatus(true,'Sincronizando…');
     localStorage.setItem(DB_KEY, JSON.stringify(DB));
     // envia o nosso banco como "patch"; o servidor mescla com o que já existe
     const res=await fetch(cfg.url,{
@@ -971,8 +982,13 @@ async function cloudSave(){
     okFinal = !!(out && out.ok);
     // o servidor devolve o banco já mesclado: adotamos como nossa versão local
     if(okFinal && out.db){
+      const antes=DB.fechamentos.length+DB.conferencias.length+DB.arquivos.length;
       DB=normalizeDB(out.db);
       localStorage.setItem(DB_KEY, JSON.stringify(DB));
+      const depois=DB.fechamentos.length+DB.conferencias.length+DB.arquivos.length;
+      // Se a nuvem trouxe lançamentos de OUTRAS filiais, atualiza as listas de leitura
+      // (nunca o formulário de fechamento, que a pessoa pode estar preenchendo).
+      if(depois!==antes) atualizarListasVisiveis();
     }
     setSyncStatus(okFinal, okFinal?'Sincronizado ✓':'A nuvem respondeu com erro.');
   }catch(e){
@@ -2782,6 +2798,19 @@ function renderAll(){
   refreshResumoFiliais();
   renderConfig();
 }
+// Atualiza apenas as LISTAS de leitura da aba ativa quando a nuvem traz dados novos.
+// Nunca toca no formulário de Fechamento (a pessoa pode estar digitando) nem em modais.
+function atualizarListasVisiveis(){
+  try{
+    const ativa=document.querySelector('.page.active');
+    const id=ativa?ativa.id:'';
+    if(id==='page-fechamento'){ if(!EDIT_ID) renderHistorico(); } // só o histórico, não o form
+    else if(id==='page-resumo') renderResumo();
+    else if(id==='page-depositos') renderDepReport();
+    else if(id==='page-calendario') renderCalendar();
+    // conferência e config não precisam de refresh automático (seleção manual)
+  }catch(e){ /* nunca deixa um erro de render travar a sincronização */ }
+}
 
 /* ---------- Logos (data URIs injetadas no build) ---------- */
 function initLogos(){
@@ -2792,13 +2821,19 @@ function initLogos(){
 /* ---------- Boot ---------- */
 initLogos();
 refreshLoginFiliais();
-// se a nuvem estiver configurada, carrega o banco compartilhado antes do login
-(async function bootCloud(){
+// A nuvem é carregada em SEGUNDO PLANO: a tela de login aparece na hora, com as
+// filiais que já estão no aparelho (localStorage). Quando o banco da nuvem chega,
+// a lista de filiais é atualizada — sem travar a abertura esperando a rede.
+(function bootCloud(){
   if(cloudAtivo()){
-    const ok=await cloudLoad();
-    refreshLoginFiliais();
     const tag=$('cloudStatusLogin');
-    if(tag) tag.textContent = ok ? 'Conectado à nuvem ✓' : 'Sem conexão com a nuvem (usando dados locais)';
+    if(tag) tag.textContent='Sincronizando com a nuvem…';
+    cloudLoad().then(ok=>{
+      refreshLoginFiliais();
+      if(tag) tag.textContent = ok ? 'Conectado à nuvem ✓' : 'Sem conexão com a nuvem (usando dados locais)';
+      // se o usuário já entrou no app enquanto a nuvem carregava, re-renderiza com o dado fresco
+      if(SESSION.filialId!==null || SESSION.master){ try{ initFechamento(); renderAll(); }catch(e){} }
+    });
   }
 })();
 
