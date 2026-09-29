@@ -252,6 +252,7 @@ tr:hover td{background:var(--panel-2)}
 /* calendário compacto: importações finas + calendário e detalhe lado a lado */
 .card-compact{padding:16px 18px}
 .imp-row{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.imp-row-3{grid-template-columns:1fr 1fr 1fr}
 .imp-cell label{margin:0 0 6px}
 .imp-inline{display:flex;gap:8px;align-items:center}
 .imp-inline .fld{flex:1;padding:9px 12px;font-size:13px}
@@ -265,7 +266,7 @@ tr:hover td{background:var(--panel-2)}
 .cal-layout{display:grid;grid-template-columns:1.3fr 1fr;gap:16px;align-items:stretch}
 #calDetailCard{display:flex;flex-direction:column}
 .cal-detail-scroll{flex:1;overflow:auto;min-height:0;max-height:560px}
-@media(max-width:860px){.cal-layout{grid-template-columns:1fr}.imp-row{grid-template-columns:1fr}}
+@media(max-width:860px){.cal-layout{grid-template-columns:1fr}.imp-row,.imp-row-3{grid-template-columns:1fr}}
 .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
 .cal-dow{text-align:center;color:var(--txt-dim);font-size:10.5px;text-transform:uppercase;padding:4px 0;font-weight:700;letter-spacing:.5px}
 .cal-cell{aspect-ratio:1;border:1px solid var(--line);border-radius:11px;padding:6px;background:var(--panel-2);cursor:pointer;position:relative;transition:transform .12s,border-color .15s,background .15s;display:flex;flex-direction:column}
@@ -518,6 +519,7 @@ body.role-master .wrap{max-width:1400px}
         </div>
         <div class="grid g2" style="margin-top:11px">
           <div><label>Valor final do caixa (R$)</label><input type="number" step="0.01" id="fValorFinal" class="fld" placeholder="0,00"></div>
+          <div><label>Quem contou o caixa</label><input type="text" id="fConferente" class="fld" placeholder="Nome de quem contou"></div>
         </div>
 
         <div class="sep"></div>
@@ -672,7 +674,7 @@ body.role-master .wrap{max-width:1400px}
       <p class="lead">Verde = todos os caixas conferidos. Vermelho = conferência pendente.</p>
 
       <div class="card card-compact">
-        <div class="imp-row">
+        <div class="imp-row imp-row-3">
           <div class="imp-cell">
             <label>Importar GetNet (Excel)</label>
             <div class="imp-inline">
@@ -685,6 +687,13 @@ body.role-master .wrap{max-width:1400px}
             <div class="imp-inline">
               <input type="file" id="fileShop9" class="fld" accept=".pdf">
               <button class="btn sec small" style="width:auto" onclick="importShop9()">Importar</button>
+            </div>
+          </div>
+          <div class="imp-cell">
+            <label>Importar Senff (PDF)</label>
+            <div class="imp-inline">
+              <input type="file" id="fileSenff" class="fld" accept=".pdf">
+              <button class="btn sec small" style="width:auto" onclick="importSenff()">Importar</button>
             </div>
           </div>
         </div>
@@ -872,6 +881,7 @@ function defaultDB(){
     arquivos: [],         // {id, tipo, nome, ts, registros:[]}
     getnetData: [],       // {filial, caixa, getnet, pix, senff}
     shop9Data: [],        // {filial, caixa, dinheiro, shop9}
+    senffData: [],        // {filial, data, senff, arqId} — vindo do PDF Senff (por filial+data)
     semMov: {},           // "data|filialId|caixaId" -> true (caixa sem movimentação naquele dia)
     resumoObs: {},        // "data|filialId" -> texto de observação (aba Resumo)
     deleted: { fechamentos:[], conferencias:[], arquivos:[], filiais:[], caixas:[] } // "lápides": ids excluídos (p/ não voltarem na sincronização)
@@ -884,7 +894,29 @@ function load(){
 }
 // garante campos novos em bancos salvos por versões anteriores
 if(!DB.semMov || typeof DB.semMov!=='object') DB.semMov={};
+if(!Array.isArray(DB.senffData)) DB.senffData=[];
 if(!DB.deleted || typeof DB.deleted!=='object') DB.deleted={ fechamentos:[], conferencias:[], arquivos:[], filiais:[], caixas:[] };
+
+// Mapa CNPJ (14 dígitos, sem pontuação) -> NOME DA FILIAL, para o import do Senff.
+// O nome à direita casa com a filial cadastrada no sistema (via normCx).
+const CNPJ_FILIAL = {
+  '21253328000351':'JARDIM DAS AMERICAS',
+  '21253328000513':'PONTA GROSSA',
+  '21253328000270':'PADRE ANCHIETA',
+  '21253328001404':'UMUARAMA',
+  '21253328000602':'REPUBLICA ARGENTINA',
+  '21253328000866':'BATEL 02',
+  '21253328000785':'PADRE ANCHIETA 02',
+  '21253328000947':'BATEL',
+  '21253328001242':'VICENTE MACHADO',
+  '21253328001323':'SHOPPING ESTACAO',
+  '21253328001595':'COLOMBO',
+  '21253328001676':'LONDRINA',
+  '21253328001757':'TIJUCAS',
+  '21253328001838':'ITAPOA',
+  '64869890000155':'REPUBLICA 2',
+  '64869890000236':'BACACHERI'
+};
 function normalizeDB(d){
   d=d||{};
   const base=defaultDB();
@@ -1058,6 +1090,7 @@ function mergeDB(remoto, local){
   };
   out.getnetData=uneImport('getnetData');
   out.shop9Data=uneImport('shop9Data');
+  out.senffData=uneImport('senffData');
   out.masterPass=L.masterPass||out.masterPass;
   return out;
 }
@@ -1174,6 +1207,14 @@ function acharImportado(arr, fNome, cNome, data){
   }
   // sem data informada: primeiro candidato
   return cands[0];
+}
+
+// Acha o Senff (do PDF) por FILIAL + DATA exata. Exige a data para nunca puxar
+// o Senff de outro dia. Retorna {filial,data,senff} ou null.
+function acharSenff(fNome, data){
+  if(!data) return null;
+  const fF=normCx(fNome);
+  return (DB.senffData||[]).find(x => normCx(x.filial)===fF && x.data===data) || null;
 }
 
 function toast(msg, type){
@@ -1408,6 +1449,7 @@ function initFechamento(){
   $('depList').innerHTML=''; $('desList').innerHTML=''; $('ecomList').innerHTML='';
   addDep(); addDes(); addEcom();
   $('fValorFinal').value='';
+  if($('fConferente')) $('fConferente').value='';
   // limpa os comprovantes (a menos que estejamos entrando em modo edição, que recarrega depois)
   if(!EDIT_ID){ COMPROVANTES=[]; }
   renderComprovanteThumbs();
@@ -1581,12 +1623,14 @@ function salvarFechamento(){
   const caixaId=$('fCaixa').value;
   if(!caixaId){ toast('Cadastre/escolha um caixa primeiro.','bad'); return; }
   const valorFinal=parseFloat($('fValorFinal').value)||0;
+  const conferente=($('fConferente')&&$('fConferente').value.trim())||''; // quem contou o caixa
 
   if(EDIT_ID){
     // modo edição: atualiza o lançamento existente
     const r=DB.fechamentos.find(x=>x.id===EDIT_ID);
     if(r){
       r.data=data; r.filialId=fid; r.caixaId=caixaId; r.valorFinal=valorFinal;
+      r.conferente=conferente;
       r.depositos=collectRows('depList',false);
       r.despesas=collectRows('desList',true);
       r.ecom=collectRows('ecomList',true);
@@ -1602,6 +1646,7 @@ function salvarFechamento(){
   const rec={
     id:uid(), data, filialId:fid, caixaId,
     valorFinal,
+    conferente,
     depositos:collectRows('depList',false),
     despesas:collectRows('desList',true),
     ecom:collectRows('ecomList',true),
@@ -1648,7 +1693,7 @@ function renderHistorico(){
   }
   if(!rows.length){ t.innerHTML=`<tr><td><div class="empty-state"><div class="em">∅</div>Nenhum lançamento ainda.</div></td></tr>`; if($('histPag'))$('histPag').innerHTML=''; return; }
   const info=paginate('hist', rows);
-  const head=`<tr><th>Foto</th><th>Data</th><th>Filial</th><th>Caixa</th><th>Caixa (R$)</th><th>Depósitos</th><th>Despesas</th><th>Ecommerce</th>${SESSION.master?'<th>Ações</th>':''}</tr>`;
+  const head=`<tr><th>Foto</th><th>Data</th><th>Filial</th><th>Quem contou</th><th>Caixa</th><th>Caixa (R$)</th><th>Depósitos</th><th>Despesas</th><th>Ecommerce</th>${SESSION.master?'<th>Ações</th>':''}</tr>`;
   const body=info.itens.map(r=>{
     const dep=r.depositos.reduce((a,b)=>a+b,0);
     const des=r.despesas.reduce((a,b)=>a+b.v,0);
@@ -1659,7 +1704,7 @@ function renderHistorico(){
       : `<span class="comp-mini-empty" title="Sem comprovante">—</span>`;
     return `<tr>
       <td data-label="Foto">${cell}</td>
-      <td data-label="Data">${fmtDate(r.data)}</td><td data-label="Filial">${filialNome(r.filialId)}</td><td data-label="Caixa">${caixaNome(r.caixaId)}</td>
+      <td data-label="Data">${fmtDate(r.data)}</td><td data-label="Filial">${filialNome(r.filialId)}</td><td data-label="Quem contou">${r.conferente?r.conferente:'—'}</td><td data-label="Caixa">${caixaNome(r.caixaId)}</td>
       <td data-label="Caixa (R$)">${fmt(r.valorFinal)}</td><td data-label="Depósitos">${fmt(dep)}</td><td data-label="Despesas">${fmt(des)}</td><td data-label="Ecommerce">${fmt(eco)}</td>
       ${SESSION.master?`<td class="acts" data-label="Ações"><button class="btn ghost small" style="width:auto" onclick="editFechamento('${r.id}')">Editar</button> <button class="btn danger small" style="width:auto" onclick="delFechamento('${r.id}')">Excluir</button></td>`:''}
     </tr>`;
@@ -1688,6 +1733,7 @@ function editFechamento(id){
     refreshCaixaSelect();
     if(DB.caixas.some(c=>c.id===r.caixaId)){ $('fCaixa').value=r.caixaId; }
     $('fValorFinal').value=r.valorFinal;
+    if($('fConferente')) $('fConferente').value=r.conferente||'';
     // preenche depósitos/despesas/ecommerce
     $('depList').innerHTML=''; $('desList').innerHTML=''; $('ecomList').innerHTML='';
     (r.depositos.length?r.depositos:[null]).forEach(v=>{ addDep(); if(v!=null){const ins=$('depList').lastElementChild.querySelector('input'); ins.value=v;} });
@@ -1791,6 +1837,11 @@ function carregarConferencia(){
     : true                                                              // registro com caixa próprio
   );
   if(gnAplica){ $('cGetnet').value=gn.getnet||''; $('cPix').value=gn.pix||''; $('cSenff').value=gn.senff||''; }
+  // Senff do PDF (por filial+data). Vai só no 1º caixa da filial (como o GetNet) e
+  // TEM PRIORIDADE sobre o Senff que vinha do Excel GetNet.
+  const sf=acharSenff(fNome, data);
+  const senffAplica = sf && ehPrimeiroCaixa;
+  if(senffAplica){ $('cSenff').value = sf.senff || ''; }
   const sh=acharImportado(DB.shop9Data, fNome, cNome, data);
   if(sh){ $('cVendaDin').value=sh.dinheiro||''; $('cShop9').value=sh.shop9||''; }
 
@@ -2003,6 +2054,89 @@ async function importShop9(){
   }catch(err){ toast('Erro ao ler PDF: '+err.message,'bad'); }
 }
 
+// Importa o PDF do Senff (Relatório de Vendas Consolidado).
+// Cada linha: EMPRESA  CNPJ(14 díg)  DATA(dd/mm/aaaa)  R$ VALOR
+// - a Empresa é ignorada; o CNPJ identifica a filial (mapa CNPJ_FILIAL)
+// - "Homologado" (o R$ valor) é a venda Senff da filial naquele dia
+// - guarda POR FILIAL + DATA (como o GetNet). Várias linhas do mesmo CNPJ+dia são somadas.
+async function importSenff(){
+  const f=$('fileSenff').files[0];
+  if(!f){ toast('Selecione o PDF do Senff.','bad'); return; }
+  if(typeof pdfjsLib==='undefined'){ toast('Biblioteca de PDF não carregou. Verifique a internet e recarregue a página.','bad'); return; }
+  try{
+    const buf=await f.arrayBuffer();
+    const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+    let full='';
+    for(let p=1;p<=pdf.numPages;p++){
+      const page=await pdf.getPage(p);
+      const tc=await page.getTextContent();
+      full += tc.items.map(i=>i.str).join(' ')+'\n';
+    }
+    const {registros:out, semMapa} = parseSenff(full);
+    const arqId=uid();
+    out.forEach(o=>o.arqId=arqId);
+    // substitui apenas registros da MESMA filial+data que esta importação traz
+    const chaves=new Set(out.map(o=>normCx(o.filial)+'|'+(o.data||'')));
+    DB.senffData = DB.senffData.filter(r => !chaves.has(normCx(r.filial)+'|'+(r.data||''))).concat(out);
+    DB.arquivos.push({id:arqId,tipo:'Senff (PDF)',nome:f.name,ts:Date.now(),registros:out.length});
+    save(); renderFiles();
+    if(out.length){
+      let msg=`Senff importado: ${out.length} registro(s).`;
+      if(semMapa.length) msg+=` (${semMapa.length} CNPJ não reconhecido)`;
+      toast(msg, semMapa.length?'bad':'ok');
+      mostrarResultadoImportSenff(out, semMapa);
+    } else {
+      toast('PDF lido, mas não encontrei linhas no layout esperado do Senff.','bad');
+      mostrarTextoCru(full);
+    }
+  }catch(err){ toast('Erro ao ler PDF do Senff: '+err.message,'bad'); }
+}
+
+// Parser do PDF Senff. Retorna {registros:[{filial,data,senff}], semMapa:[cnpj...]}.
+// Robustez: procura, em qualquer ordem próxima, um CNPJ de 14 dígitos, uma data
+// dd/mm/aaaa e um valor R$ na mesma linha lógica. Ignora cabeçalho, TOTAL e rodapé.
+function parseSenff(rawText){
+  const text=(rawText||'').replace(/ /g,' ');
+  // quebra em "linhas" por CNPJ: cada registro começa num CNPJ de 14 dígitos.
+  // captura CNPJ, depois a 1ª data dd/mm/aaaa e o 1º valor monetário que vierem após ele.
+  const re=/(\d{14})\D{0,40}?(\d{2}\/\d{2}\/\d{4})\D{0,20}?R?\$?\s*([\d.]+,\d{2})/g;
+  const somas={};       // "cnpj|data" -> valor somado
+  const semMapa=new Set();
+  let m;
+  while((m=re.exec(text))!==null){
+    const cnpj=m[1];
+    const d=m[2].split('/');               // dd/mm/aaaa
+    const dataISO=d[2]+'-'+d[1]+'-'+d[0];
+    const valor=br(m[3]);
+    const nomeFilial=CNPJ_FILIAL[cnpj];
+    if(!nomeFilial){ semMapa.add(cnpj); continue; }  // CNPJ fora da tabela: reporta, não inventa
+    const k=cnpj+'|'+dataISO;
+    somas[k]=(somas[k]||0)+valor;          // soma se houver mais de uma linha no mesmo dia
+  }
+  const registros=Object.keys(somas).map(k=>{
+    const [cnpj,data]=k.split('|');
+    return { filial:CNPJ_FILIAL[cnpj], data, senff:Math.round(somas[k]*100)/100 };
+  });
+  return { registros, semMapa:Array.from(semMapa) };
+}
+
+// Painel de conferência do que foi lido do PDF Senff.
+function mostrarResultadoImportSenff(arr, semMapa){
+  let box=$('importResult');
+  if(!box){
+    box=document.createElement('div'); box.id='importResult'; box.className='hint';
+    box.style.marginTop='14px';
+    const card=$('fileSenff').closest('.card'); card.appendChild(box);
+  }
+  box.style.display='block'; box.style.borderLeftColor='var(--green)';
+  const linhas=arr.slice(0,50).map(x=>`• ${fmtDate(x.data)} · <b>${x.filial}</b> — Senff ${fmt(x.senff)}`).join('<br>');
+  const datas=[...new Set(arr.map(x=>x.data).filter(Boolean))].map(fmtDate);
+  const resumoDatas = datas.length ? `<br><span style="color:var(--accent)">Data(s) no arquivo: ${datas.join(', ')} — selecione essa data na conferência.</span>` : '';
+  const aviso = (semMapa&&semMapa.length) ? `<br><span style="color:var(--red)">CNPJ não reconhecido(s): ${semMapa.join(', ')} — verifique a tabela de CNPJs.</span>` : '';
+  box.innerHTML=`<b>Senff: ${arr.length} registro(s) lido(s).</b> Confira filiais e datas:${resumoDatas}${aviso}<br>
+    <div style="margin-top:6px;line-height:1.7;max-height:240px;overflow:auto">${linhas}</div>`;
+}
+
 // Em caso de falha de leitura, exibe o texto cru extraído do PDF (ajuda a diagnosticar o layout).
 function mostrarTextoCru(txt){
   let box=$('importResult');
@@ -2125,7 +2259,8 @@ function renderFiles(){
   // detecta registros importados ÓRFÃOS (sem arquivo correspondente) — possíveis "fantasmas"
   const ids=new Set(DB.arquivos.map(a=>a.id));
   const orfaos = DB.getnetData.filter(r=>!r.arqId||!ids.has(r.arqId)).length
-               + DB.shop9Data.filter(r=>!r.arqId||!ids.has(r.arqId)).length;
+               + DB.shop9Data.filter(r=>!r.arqId||!ids.has(r.arqId)).length
+               + (DB.senffData||[]).filter(r=>!r.arqId||!ids.has(r.arqId)).length;
   const aviso = orfaos>0
     ? `<tr><td colspan="5"><div class="hint" style="border-left-color:var(--red);margin:0">
          Há <b>${orfaos}</b> registro(s) importado(s) sem arquivo (de importações antigas) que podem
@@ -2147,10 +2282,11 @@ function renderFiles(){
 function limparImportadosOrfaos(){
   askMaster('Remover os dados importados antigos que não têm arquivo na lista? Isso elimina valores fantasmas (ex.: GetNet errado da Bacacheri).', ()=>{
     const ids=new Set(DB.arquivos.map(a=>a.id));
-    const antes=DB.getnetData.length+DB.shop9Data.length;
+    const antes=DB.getnetData.length+DB.shop9Data.length+(DB.senffData||[]).length;
     DB.getnetData=DB.getnetData.filter(r=>r.arqId && ids.has(r.arqId));
     DB.shop9Data =DB.shop9Data.filter(r=>r.arqId && ids.has(r.arqId));
-    const removidos=antes-(DB.getnetData.length+DB.shop9Data.length);
+    DB.senffData =(DB.senffData||[]).filter(r=>r.arqId && ids.has(r.arqId));
+    const removidos=antes-(DB.getnetData.length+DB.shop9Data.length+DB.senffData.length);
     save(); renderFiles();
     toast(removidos>0?`${removidos} registro(s) órfão(s) removido(s).`:'Nenhum dado órfão encontrado.','ok');
   });
@@ -2160,20 +2296,23 @@ function delArquivo(arqId){
   const a=DB.arquivos.find(x=>x.id===arqId);
   if(!a) return;
   askMaster(`Excluir o arquivo "${a.nome}", os dados importados dele e desfazer as conferências que usaram esses dados?`, ()=>{
-    const antesGN=DB.getnetData.length, antesSh=DB.shop9Data.length;
+    const antesGN=DB.getnetData.length, antesSh=DB.shop9Data.length, antesSf=(DB.senffData||[]).length;
 
     // descobre as combinações (filial/caixa/data) que este arquivo alimentava,
     // ANTES de remover os registros, para então desfazer as conferências ligadas a elas.
     const shDoArq = DB.shop9Data.filter(r=>r.arqId===arqId);
     const gnDoArq = DB.getnetData.filter(r=>r.arqId===arqId);
-    // chaves Shop9: por filial+caixa+data ; chaves GetNet: por filial+data (cartões por filial)
+    const sfDoArq = (DB.senffData||[]).filter(r=>r.arqId===arqId);
+    // chaves Shop9: por filial+caixa+data ; GetNet e Senff: por filial+data (por filial)
     const chaveShop9 = new Set(shDoArq.map(r=>normCx(r.filial)+'|'+normCx(r.caixa)+'|'+(r.data||'')));
     const chaveGetnet = new Set(gnDoArq.map(r=>normCx(r.filial)+'|'+(r.data||'')));
+    const chaveSenff = new Set(sfDoArq.map(r=>normCx(r.filial)+'|'+(r.data||'')));
 
     // remove os registros deste arquivo (pelo arqId)
     DB.getnetData = DB.getnetData.filter(r => r.arqId!==arqId);
     DB.shop9Data  = DB.shop9Data.filter(r => r.arqId!==arqId);
-    const removidos=(antesGN-DB.getnetData.length)+(antesSh-DB.shop9Data.length);
+    DB.senffData  = (DB.senffData||[]).filter(r => r.arqId!==arqId);
+    const removidos=(antesGN-DB.getnetData.length)+(antesSh-DB.shop9Data.length)+(antesSf-DB.senffData.length);
 
     // desfaz as conferências que usavam esses dados → no calendário voltam a VERMELHO
     const antesConf=DB.conferencias.length;
@@ -2182,7 +2321,7 @@ function delArquivo(arqId){
       const kShop9=normCx(fnome)+'|'+normCx(cnome)+'|'+(c.data||'');
       const kGetnet=normCx(fnome)+'|'+(c.data||'');
       // se a conferência dependia de um dado removido deste arquivo, ela é desfeita
-      const dependia = chaveShop9.has(kShop9) || chaveGetnet.has(kGetnet);
+      const dependia = chaveShop9.has(kShop9) || chaveGetnet.has(kGetnet) || chaveSenff.has(kGetnet);
       if(dependia) tombstone('conferencias', c.id); // lápide p/ não voltar na sincronização
       return !dependia;
     });
