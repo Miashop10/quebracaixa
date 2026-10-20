@@ -561,8 +561,10 @@ body.role-master .wrap{max-width:1400px}
           <div class="total-box ecom"><div class="lbl">Total Ecommerce</div><div class="val" id="tEcom">R$ 0,00</div></div>
         </div>
 
-        <button class="btn inline-save" style="margin-top:14px;width:auto" onclick="salvarFechamento()">Lançar fechamento</button>
-      </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:14px">
+          <button class="btn inline-save" style="width:auto;margin:0" onclick="salvarFechamento()">Lançar fechamento</button>
+          <button class="btn green" style="width:auto;margin:0" onclick="forcarEnvioNuvem()" title="Enviar agora tudo deste aparelho para a nuvem e confirmar">☁ Enviar para a nuvem</button>
+        </div>
 
       <div class="card">
         <div class="filter-bar">
@@ -713,7 +715,10 @@ body.role-master .wrap{max-width:1400px}
           <div class="cal-grid" id="calGrid"></div>
         </div>
         <div class="card" id="calDetailCard" style="margin-bottom:0;display:none">
-          <h3 id="calDetailTitle">Detalhes do dia</h3>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+            <h3 id="calDetailTitle" style="margin:0">Detalhes do dia</h3>
+            <button class="btn green small" id="btnConferirTodos" style="width:auto;display:none" onclick="conferirTodosDoDia(CAL_DIA_ABERTO)" title="Conferir de uma vez todos os caixas pendentes que têm fechamento lançado">✓ Conferir todos</button>
+          </div>
           <div id="calDetail" class="cal-detail-scroll"></div>
         </div>
       </div>
@@ -767,8 +772,9 @@ body.role-master .wrap{max-width:1400px}
   </div>
 
   <!-- barra fixa de ação no celular (filiais) -->
-  <div class="mobile-bottombar">
-    <button class="btn" onclick="salvarFechamento()">Lançar fechamento</button>
+  <div class="mobile-bottombar" style="display:flex;gap:8px">
+    <button class="btn" style="flex:1" onclick="salvarFechamento()">Lançar fechamento</button>
+    <button class="btn green" style="flex:0 0 auto;padding-left:16px;padding-right:16px" onclick="forcarEnvioNuvem()" title="Enviar para a nuvem">☁</button>
   </div>
 </div>
 
@@ -1012,15 +1018,48 @@ async function cloudSave(){
     });
     const out=await res.json();
     okFinal = !!(out && out.ok);
-    // o servidor devolve o banco já mesclado: adotamos como nossa versão local
+    // o servidor devolve o banco mesclado. MAS, enquanto a rede trabalhava, o usuário
+    // pode ter feito NOVAS conferências/lançamentos no DB local. NUNCA substituímos o DB
+    // cegamente (isso apagaria o que foi feito durante a sincronização). Em vez disso,
+    // MESCLAMOS o retorno do servidor com o DB local ATUAL (ts maior vence).
     if(okFinal && out.db){
-      const antes=DB.fechamentos.length+DB.conferencias.length+DB.arquivos.length;
-      DB=normalizeDB(out.db);
+      const assinaturaAntes = JSON.stringify({
+        f:DB.fechamentos.map(x=>x.id+':'+(x.ts||0)).sort(),
+        c:DB.conferencias.map(x=>x.id+':'+(x.ts||0)).sort(),
+        sm:Object.keys(DB.semMov||{}).sort(),
+        dc:Object.keys(DB.depChecks||{}).sort(),
+        ro:Object.keys(DB.resumoObs||{}).sort()
+      });
+      // assinatura do que o SERVIDOR devolveu (para saber se o merge manteve algo local a mais)
+      const remoto=normalizeDB(out.db);
+      const assinaturaRemoto = JSON.stringify({
+        f:remoto.fechamentos.map(x=>x.id+':'+(x.ts||0)).sort(),
+        c:remoto.conferencias.map(x=>x.id+':'+(x.ts||0)).sort(),
+        sm:Object.keys(remoto.semMov||{}).sort(),
+        dc:Object.keys(remoto.depChecks||{}).sort(),
+        ro:Object.keys(remoto.resumoObs||{}).sort()
+      });
+      // une servidor (remoto) com o que está aqui AGORA (local) — preserva o trabalho recente
+      DB = mergeDB(remoto, DB);
       localStorage.setItem(DB_KEY, JSON.stringify(DB));
-      const depois=DB.fechamentos.length+DB.conferencias.length+DB.arquivos.length;
-      // Se a nuvem trouxe lançamentos de OUTRAS filiais, atualiza as listas de leitura
-      // (nunca o formulário de fechamento, que a pessoa pode estar preenchendo).
-      if(depois!==antes) atualizarListasVisiveis();
+      const assinaturaDepois = JSON.stringify({
+        f:DB.fechamentos.map(x=>x.id+':'+(x.ts||0)).sort(),
+        c:DB.conferencias.map(x=>x.id+':'+(x.ts||0)).sort(),
+        sm:Object.keys(DB.semMov||{}).sort(),
+        dc:Object.keys(DB.depChecks||{}).sort(),
+        ro:Object.keys(DB.resumoObs||{}).sort()
+      });
+      // Se o resultado do merge difere do que o servidor devolveu, é porque o DB local
+      // tinha algo que a nuvem ainda não tem (ex.: conferências feitas durante a espera).
+      // Então re-renderiza E reenvia para subir esse extra. Converge: no próximo ciclo o
+      // servidor já terá tudo e as assinaturas baterão, parando o reenvio.
+      if(assinaturaDepois!==assinaturaRemoto){
+        atualizarListasVisiveis();
+        CLOUD_PENDING=true; // há dado local a mais → sobe à nuvem
+      } else if(assinaturaDepois!==assinaturaAntes){
+        // mudou só porque a nuvem trouxe dados de outra filial → só re-renderiza
+        atualizarListasVisiveis();
+      }
     }
     setSyncStatus(okFinal, okFinal?'Sincronizado ✓':'A nuvem respondeu com erro.');
   }catch(e){
@@ -1762,11 +1801,11 @@ function setEditBanner(on, r){
     }
     b.style.display='block';
     b.innerHTML=`<b>Editando lançamento</b> de ${filialNome(r.filialId)} · ${fmtDate(r.data)}. As alterações substituem o lançamento original. <button class="btn ghost small" style="width:auto;margin-left:8px" onclick="cancelarEdicao()">Cancelar edição</button>`;
-    // troca o texto dos botões de salvar
-    document.querySelectorAll('.inline-save, .mobile-bottombar .btn').forEach(btn=>btn.textContent='Salvar alterações');
+    // troca o texto dos botões de salvar (NÃO o botão de nuvem, que tem a classe .green)
+    document.querySelectorAll('.inline-save, .mobile-bottombar .btn:not(.green)').forEach(btn=>btn.textContent='Salvar alterações');
   } else {
     if(b) b.style.display='none';
-    document.querySelectorAll('.inline-save, .mobile-bottombar .btn').forEach(btn=>btn.textContent='Lançar fechamento');
+    document.querySelectorAll('.inline-save, .mobile-bottombar .btn:not(.green)').forEach(btn=>btn.textContent='Lançar fechamento');
   }
 }
 function cancelarEdicao(){ EDIT_ID=null; setEditBanner(false); initFechamento(); toast('Edição cancelada.','ok'); }
@@ -2677,9 +2716,19 @@ function filialQuebraDia(ds, fid){
 // guarda qual filial está expandida no detalhe do dia
 let CAL_FIL_ABERTA = null;
 
+let CAL_DIA_ABERTO=null; // dia atualmente aberto no detalhe (usado pelo botão "Conferir todos")
 function calDetail(ds){
+  CAL_DIA_ABERTO=ds;
   $('calDetailCard').style.display='flex';
   $('calDetailTitle').textContent='Dia '+fmtDate(ds);
+  // mostra o botão "Conferir todos" só se houver caixa PENDENTE com fechamento lançado
+  const btnTodos=$('btnConferirTodos');
+  if(btnTodos){
+    const temPendente=DB.caixas.some(c=>
+      caixaAtivoNoDia(c, ds) && !isConferido(ds,c.filialId,c.id) && !isSemMov(ds,c.filialId,c.id)
+      && DB.fechamentos.some(r=>r.data===ds && r.filialId===c.filialId && r.caixaId===c.id));
+    btnTodos.style.display = temPendente ? '' : 'none';
+  }
   if(!DB.filiais.length){ $('calDetail').innerHTML=`<div class="empty-state">Nenhuma filial cadastrada.</div>`; return; }
 
   const filiaisOrd=DB.filiais.slice().sort((a,b)=>a.nome.localeCompare(b.nome));
@@ -2798,6 +2847,74 @@ function conferirRapido(ds,fid,cid){
   // volta o foco ao calendário e atualiza cores/detalhe
   if(typeof renderCalendar==='function') renderCalendar();
   calDetail(ds);
+}
+
+// Versão SILENCIOSA da conferência rápida, para o "Conferir todos":
+// calcula e grava a conferência de UM caixa SEM pop-ups, SEM save individual e
+// SEM re-render (o save/sync e o render são feitos UMA vez no fim pelo chamador).
+// Retorna true se conferiu, false se não havia fechamento (nada a conferir).
+function conferirRapidoSilencioso(ds,fid,cid){
+  const temFech=DB.fechamentos.some(r=>r.data===ds && r.filialId===fid && r.caixaId===cid);
+  if(!temFech) return false; // sem fechamento: não há o que conferir
+  // preenche os campos (existem no DOM mesmo com a aba oculta) e calcula
+  $('cData').value=ds;
+  $('cFilial').value=fid;
+  $('cFilial').dispatchEvent(new Event('change'));
+  $('cCaixa').value=cid;
+  carregarConferencia();
+  calcDinheiro();
+  calcCartoes();
+  // grava a conferência diretamente no DB (mesmos campos de salvarConferencia),
+  // porém sem confirm de dupla contagem, sem save() e sem renderResumo()
+  const num = txt => parseFloat(String(txt).replace(/[^\d,-]/g,'').replace(/\./g,'').replace(',','.'))||0;
+  const meuGetnet=parseFloat($('cGetnet').value)||0;
+  const meuPix=parseFloat($('cPix').value)||0;
+  const meuSenff=parseFloat($('cSenff').value)||0;
+  DB.conferencias=DB.conferencias.filter(c=>!(c.data===ds&&c.filialId===fid&&c.caixaId===cid));
+  DB.conferencias.push({
+    id:uid(), data:ds, filialId:fid, caixaId:cid,
+    vendaDin:parseFloat($('cVendaDin').value)||0,
+    fechamento:parseFloat($('cFechamento').value)||0,
+    esperado:num($('cEsperado').textContent),
+    shop9:parseFloat($('cShop9').value)||0, getnet:meuGetnet,
+    pix:meuPix, senff:meuSenff,
+    quebraDin:num($('cQuebraDin').textContent),
+    quebraCart:num($('cQuebraCart').textContent),
+    ts:Date.now()
+  });
+  return true;
+}
+
+// Confere TODOS os caixas (de todas as filiais) do dia de uma só vez.
+// Só confere caixas ATIVOS no dia, COM fechamento lançado e que AINDA não estão
+// conferidos nem marcados sem-movimentação. Pede confirmação, grava e sincroniza UMA vez.
+function conferirTodosDoDia(ds){
+  // monta a lista de pendentes (tem fechamento, está ativo, ainda não resolvido)
+  const pendentes=[];
+  DB.caixas.forEach(c=>{
+    if(!caixaAtivoNoDia(c, ds)) return;                 // caixa ainda não existia neste dia
+    if(isConferido(ds,c.filialId,c.id)) return;          // já conferido
+    if(isSemMov(ds,c.filialId,c.id)) return;             // marcado sem movimentação
+    const temFech=DB.fechamentos.some(r=>r.data===ds && r.filialId===c.filialId && r.caixaId===c.id);
+    if(temFech) pendentes.push(c);
+  });
+  if(!pendentes.length){
+    toast('Nenhum caixa pendente com fechamento lançado neste dia.','bad');
+    return;
+  }
+  const ok=confirm(`Conferir TODOS os caixas pendentes do dia ${fmtDate(ds)}?\n\n`+
+    `Serão conferidos ${pendentes.length} caixa(s) que têm fechamento lançado e ainda não foram conferidos.\n\n`+
+    `A quebra de cada um será calculada com os dados lançados/importados até agora.`);
+  if(!ok) return;
+  // confere todos em memória (silencioso), sem salvar/sincronizar a cada um
+  let feitos=0;
+  pendentes.forEach(c=>{ if(conferirRapidoSilencioso(ds, c.filialId, c.id)) feitos++; });
+  // UM save/sincronização no fim (seguro: o merge preserva tudo)
+  save();
+  if(typeof renderResumo==='function') renderResumo();
+  if(typeof renderCalendar==='function') renderCalendar();
+  calDetail(ds);
+  toast(`${feitos} caixa(s) conferido(s) de uma vez. Sincronizando…`,'ok');
 }
 
 /* ============================================================
