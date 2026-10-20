@@ -768,6 +768,17 @@ body.role-master .wrap{max-width:1400px}
         </div>
         <button class="btn small danger" style="margin-top:14px;width:auto" onclick="trocarMaster()">Trocar senha master</button>
       </div>
+      <div class="card settings-box" data-master-only>
+        <h3>Endereço da nuvem (avançado)</h3>
+        <p class="lead" style="margin:0 0 10px">Se um dia a nuvem parar de sincronizar porque a URL do Apps Script mudou, cole aqui a URL nova (termina em <b>/exec</b>) e salve. Vale só neste navegador. Deixe em branco para usar a URL padrão do sistema.</p>
+        <label>URL do Apps Script</label>
+        <input type="text" id="cloudUrlOverride" class="fld" placeholder="https://script.google.com/macros/s/..../exec">
+        <div id="cloudUrlStatus" class="lead" style="margin:8px 0 0"></div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
+          <button class="btn green small" style="width:auto" onclick="salvarCloudUrl()">Salvar e testar</button>
+          <button class="btn ghost small" style="width:auto" onclick="limparCloudUrl()">Usar URL padrão</button>
+        </div>
+      </div>
     </div>
 
   </div>
@@ -822,6 +833,7 @@ try {
 
 const DB_KEY = 'miashop_db_v1';
 const CLOUD_CFG_KEY = 'miashop_cloud_cfg'; // (legado) config manual por dispositivo
+const CLOUD_URL_OVERRIDE_KEY = 'miashop_cloud_url'; // URL da nuvem definida pela TELA (tem prioridade)
 
 /* ---------- Configuração da nuvem (Apps Script) — EMBUTIDA ----------
    A URL fica fixa aqui, então o sistema já conecta sozinho em qualquer
@@ -829,15 +841,41 @@ const CLOUD_CFG_KEY = 'miashop_cloud_cfg'; // (legado) config manual por disposi
 /* >>>>>> COLE AQUI A URL DO SEU APPS SCRIPT NOVO (termina em /exec) <<<<<<
    Exemplo: const CLOUD_URL = 'https://script.google.com/macros/s/AKfyc..../exec';
    Sem isso, o sistema funciona só neste computador (não sincroniza).            */
-const CLOUD_URL   = 'https://script.google.com/macros/s/AKfycbz3YGwPsAUNUjjEDP0kedvdZd8gDXQwOuuDpuX1yMcUCNA_4tnWKfiyymUzsX8Q65bH/exec';
+const CLOUD_URL   = 'https://script.google.com/macros/s/AKfycbyNHFE1izzQXNUSbHf3GBJEhMtFW3SO_2QNVKRdzS5Y_PJQkCd8vcS0jBNg_AaoC4FN/exec';
 const CLOUD_TOKEN = ''; // sem token
 
 function getCloudCfg(){
-  // usa a URL embutida se estiver preenchida corretamente
+  // 1º) URL definida pela TELA (Filiais → "Endereço da nuvem") TEM PRIORIDADE.
+  //     Assim, se a URL do Apps Script mudar, basta colar a nova na tela — sem
+  //     editar código nem subir no GitHub de novo.
+  try{
+    const over=localStorage.getItem(CLOUD_URL_OVERRIDE_KEY);
+    if(over && over.indexOf('script.google.com')>=0){
+      return { url:over.trim(), token:'' };
+    }
+  }catch(e){}
+  // 2º) URL embutida no código (padrão)
   if(CLOUD_URL && CLOUD_URL.indexOf('script.google.com')>=0){
     return { url:CLOUD_URL.trim(), token:(CLOUD_TOKEN||'').trim() };
   }
+  // 3º) config manual legada
   try{ const r=localStorage.getItem(CLOUD_CFG_KEY); return r?JSON.parse(r):null; }catch(e){ return null; }
+}
+// Define/limpa a URL da nuvem pela tela (guardada só neste navegador).
+function setCloudUrlOverride(url){
+  try{
+    if(url && url.trim().indexOf('script.google.com')>=0){
+      localStorage.setItem(CLOUD_URL_OVERRIDE_KEY, url.trim());
+      return true;
+    } else if(!url || !url.trim()){
+      localStorage.removeItem(CLOUD_URL_OVERRIDE_KEY); // volta a usar a embutida
+      return true;
+    }
+  }catch(e){}
+  return false;
+}
+function getCloudUrlOverride(){
+  try{ return localStorage.getItem(CLOUD_URL_OVERRIDE_KEY)||''; }catch(e){ return ''; }
 }
 function setCloudCfg(url, token){
   if(url&&token) localStorage.setItem(CLOUD_CFG_KEY, JSON.stringify({url:url.trim(), token:token.trim()}));
@@ -3006,6 +3044,8 @@ function desconectarCloud(){
 }
 
 function renderConfig(){
+  // preenche o campo "Endereço da nuvem" com a URL salva (se houver)
+  if($('cloudUrlOverride')) $('cloudUrlOverride').value = getCloudUrlOverride();
   // select de filial p/ caixa
   $('newCaixaFilial').innerHTML = DB.filiais.map(f=>`<option value="${f.id}">${f.nome}</option>`).join('')||'<option value="">— crie uma filial —</option>';
   // lista filiais
@@ -3072,6 +3112,39 @@ function trocarMaster(){
   DB.masterPass=nw; save();
   $('oldMaster').value=''; $('newMaster').value='';
   toast('Senha master alterada.','ok');
+}
+
+// Salva a URL da nuvem definida pela tela, TESTA se responde e recarrega os dados.
+async function salvarCloudUrl(){
+  const url=($('cloudUrlOverride')&&$('cloudUrlOverride').value||'').trim();
+  const st=$('cloudUrlStatus');
+  if(url && url.indexOf('script.google.com')<0){
+    if(st){ st.textContent='URL inválida — deve conter script.google.com e terminar em /exec.'; st.style.color='var(--red)'; }
+    return;
+  }
+  if(st){ st.textContent='Testando a URL…'; st.style.color='var(--txt-dim)'; }
+  // testa a URL antes de adotar (action=version é rápido)
+  try{
+    const res=await fetch(url+'?action=version',{method:'GET',cache:'no-store'});
+    const txt=await res.text();
+    if(!txt.trim().startsWith('{')){ throw new Error('a URL não respondeu como esperado'); }
+  }catch(e){
+    if(st){ st.textContent='Não consegui conectar nessa URL. Verifique e tente de novo. ('+e.message+')'; st.style.color='var(--red)'; }
+    return;
+  }
+  setCloudUrlOverride(url);
+  if(st){ st.textContent='URL salva ✓ — carregando os dados da nuvem…'; st.style.color='var(--green)'; }
+  await cloudLoad();
+  initFechamento(); renderAll();
+  if(typeof renderCalendar==='function') renderCalendar();
+  if(st){ st.textContent='Conectado ✓ Dados carregados. (Filiais: '+DB.filiais.length+', fechamentos: '+DB.fechamentos.length+')'; st.style.color='var(--green)'; }
+  toast('Endereço da nuvem atualizado e conectado.','ok');
+}
+function limparCloudUrl(){
+  setCloudUrlOverride('');
+  if($('cloudUrlOverride')) $('cloudUrlOverride').value='';
+  const st=$('cloudUrlStatus'); if(st){ st.textContent='Voltou a usar a URL padrão do sistema. Recarregue a página (Ctrl+Shift+R).'; st.style.color='var(--txt-dim)'; }
+  toast('Voltou para a URL padrão.','ok');
 }
 
 /* ============================================================
