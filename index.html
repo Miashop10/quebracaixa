@@ -437,9 +437,9 @@ body.role-master .wrap{max-width:1400px}
 }
 
 /* a barra fixa só aparece em celular E na aba de fechamento ativa */
-.mobile-bottombar{display:none}
+.mobile-bottombar{display:none !important}
 @media(max-width:768px){
-  body.show-fixed-save .mobile-bottombar{display:block}
+  body.show-fixed-save .mobile-bottombar{display:flex !important;gap:8px}
   .inline-save{display:none}
 }
 
@@ -772,7 +772,7 @@ body.role-master .wrap{max-width:1400px}
   </div>
 
   <!-- barra fixa de ação no celular (filiais) -->
-  <div class="mobile-bottombar" style="display:flex;gap:8px">
+  <div class="mobile-bottombar">
     <button class="btn" style="flex:1" onclick="salvarFechamento()">Lançar fechamento</button>
     <button class="btn green" style="flex:0 0 auto;padding-left:16px;padding-right:16px" onclick="forcarEnvioNuvem()" title="Enviar para a nuvem">☁</button>
   </div>
