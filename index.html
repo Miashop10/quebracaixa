@@ -10,6 +10,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=Inter+Tight:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
 <style>
 :root{
   --bg:#eef1f7;
@@ -956,12 +957,40 @@ function agendarCloudSave(){
 }
 
 /* ---------- Sincronização com a nuvem ---------- */
+// Baixa o banco da nuvem, PREFERINDO a versão comprimida (gzip) — rápida mesmo com
+// bancos grandes (2 MB+). Se o backend ainda não tem gzip, ou a descompressão falha,
+// cai para o 'load' normal. Retorna o objeto do banco, ou null se não veio nada.
+async function baixarBancoNuvem(cfg){
+  // 1ª tentativa: comprimido (loadgz) — transfere ~200 KB em vez de 2,4 MB
+  try{
+    const res=await fetch(cfg.url+'?action=loadgz',{method:'GET',cache:'no-store'});
+    const data=await res.json();
+    if(data && data.ok && typeof data.gz==='string'){
+      if(data.gz==='') return null;            // planilha vazia
+      if(typeof pako!=='undefined'){
+        // base64 -> bytes -> gunzip -> texto -> JSON
+        const bin=atob(data.gz);
+        const bytes=new Uint8Array(bin.length);
+        for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+        const txt=pako.ungzip(bytes,{to:'string'});
+        return JSON.parse(txt);
+      }
+      // sem pako: não consegue descomprimir, cai para o load normal abaixo
+    }
+  }catch(e){ console.warn('loadgz falhou, tentando load normal', e); }
+  // 2ª tentativa (fallback): load normal (JSON cru)
+  const res2=await fetch(cfg.url+'?action=load',{method:'GET',cache:'no-store'});
+  const data2=await res2.json();
+  if(data2 && data2.ok) return data2.db || null;
+  return null;
+}
+
 // Carrega o banco da nuvem (chamado no login). Se vazio, sobe o banco local atual.
 async function cloudLoad(){
   const cfg=getCloudCfg(); if(!cfg) return false;
   try{
-    const res=await fetch(cfg.url+'?action=load',{method:'GET',cache:'no-store'});
-    const data=await res.json();
+    const bancoRemoto=await baixarBancoNuvem(cfg);
+    const data={ ok:true, db:bancoRemoto };
     if(data && data.ok){
       if(data.db){
         // MESCLA o remoto com o que já existe localmente, para não apagar
